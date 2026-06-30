@@ -1,13 +1,177 @@
+import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
+import { genesisHash, nextHash } from '../lib/hash';
+
+/** Per-stream metadata; the O(1) head of the log. */
+interface Meta {
+  /** The stream id this object was created for (used to derive the genesis hash). */
+  streamId: string;
+  /** Highest assigned sequence number (0 before the first append). */
+  seq: number;
+  /** Number of events in the stream. */
+  count: number;
+  /** Hash of the most recent event, or the genesis hash when empty. */
+  headHash: string;
+}
+
+/** A persisted event. */
+export interface StoredEvent {
+  seq: number;
+  prevHash: string;
+  hash: string;
+  payload: unknown;
+  createdAt: number;
+}
+
+/** Idempotency record: maps an Idempotency-Key to the event it produced. */
+interface IdemRecord {
+  seq: number;
+  hash: string;
+}
+
+/** Result of an append (or an idempotent replay). */
+export interface AppendResult {
+  seq: number;
+  hash: string;
+  prevHash: string;
+  createdAt: number;
+  /** True when this call replayed an existing event for a repeated key. */
+  replay: boolean;
+}
+
+const META_KEY = 'meta';
+
+/** Zero-padded so DO storage `list()` returns events in seq order. */
+function eventKey(seq: number): string {
+  return `event:${String(seq).padStart(12, '0')}`;
+}
+
+function idemKey(key: string): string {
+  return `idem:${key}`;
+}
 
 /**
  * StreamDO — one instance per stream; the authoritative source of truth for
- * ordering and integrity. Implemented in Phase 2.
+ * ordering and integrity.
+ *
+ * A Durable Object is single-threaded, so there is no shared-memory race to
+ * guard against. The one remaining hazard is *interleaving across awaits*: an
+ * append reads `meta`, awaits a SHA-256 digest, then writes — and a second
+ * concurrent append could slip in at the digest await. We close that window by
+ * running each mutation inside `blockConcurrencyWhile`, which defers delivery of
+ * other events until the critical section completes. The result is strict
+ * serialization — monotonic `seq` and exactly-once appends — with no locks,
+ * leases, or coordination beyond the platform.
  */
-export class StreamDO {
-  constructor(_state: DurableObjectState, _env: Env) {}
+export class StreamDO extends DurableObject<Env> {
+  /**
+   * Initialize the stream. Idempotent: calling it again is a no-op so stream
+   * creation can be safely retried.
+   */
+  async create(streamId: string): Promise<{ created: boolean }> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const existing = await this.ctx.storage.get<Meta>(META_KEY);
+      if (existing) return { created: false };
 
-  async fetch(_request: Request): Promise<Response> {
-    return new Response('not implemented', { status: 501 });
+      const headHash = await genesisHash(streamId);
+      await this.ctx.storage.put<Meta>(META_KEY, {
+        streamId,
+        seq: 0,
+        count: 0,
+        headHash,
+      });
+      return { created: true };
+    });
+  }
+
+  /**
+   * Append a payload under an idempotency key.
+   *
+   * If the key was used before, the original event is returned unchanged with
+   * `replay: true` and nothing is written — exactly-once under client retries.
+   * Otherwise a new event is linked into the hash chain and `meta`, the event,
+   * and the idempotency record are committed in a single atomic batch.
+   */
+  async append(payload: unknown, idempotencyKey: string): Promise<AppendResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const meta = await this.ctx.storage.get<Meta>(META_KEY);
+      if (!meta) throw new Error('stream not initialized');
+
+      const prior = await this.ctx.storage.get<IdemRecord>(
+        idemKey(idempotencyKey),
+      );
+      if (prior) {
+        const event = await this.ctx.storage.get<StoredEvent>(
+          eventKey(prior.seq),
+        );
+        return {
+          seq: prior.seq,
+          hash: prior.hash,
+          prevHash: event!.prevHash,
+          createdAt: event!.createdAt,
+          replay: true,
+        };
+      }
+
+      const seq = meta.seq + 1;
+      const prevHash = meta.headHash;
+      const hash = await nextHash(prevHash, payload, seq);
+      const createdAt = Date.now();
+      const event: StoredEvent = { seq, prevHash, hash, payload, createdAt };
+
+      // One batched put → atomic commit of all three keys.
+      await this.ctx.storage.put({
+        [eventKey(seq)]: event,
+        [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
+        [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
+      });
+
+      return { seq, hash, prevHash, createdAt, replay: false };
+    });
+  }
+
+  /** O(1) head of the log: total count and the current head hash. */
+  async head(): Promise<{ count: number; headHash: string }> {
+    const meta = await this.ctx.storage.get<Meta>(META_KEY);
+    if (!meta) throw new Error('stream not initialized');
+    return { count: meta.count, headHash: meta.headHash };
+  }
+
+  /**
+   * Recompute the hash chain from genesis and report the first sequence number
+   * whose stored hash diverges from the recomputed value. An untampered stream
+   * returns `{ valid: true }`.
+   */
+  async verify(): Promise<{ valid: boolean; brokenAt?: number }> {
+    const meta = await this.ctx.storage.get<Meta>(META_KEY);
+    if (!meta) return { valid: true };
+
+    let prev = await genesisHash(meta.streamId);
+    for await (const event of this.iterateEvents()) {
+      const expected = await nextHash(prev, event.payload, event.seq);
+      if (expected !== event.hash) {
+        return { valid: false, brokenAt: event.seq };
+      }
+      prev = expected;
+    }
+    return { valid: true };
+  }
+
+  /** Yield every stored event in ascending seq order, paginating storage. */
+  private async *iterateEvents(): AsyncGenerator<StoredEvent> {
+    let cursor: string | undefined;
+    for (;;) {
+      const batch = await this.ctx.storage.list<StoredEvent>({
+        prefix: 'event:',
+        startAfter: cursor,
+        limit: 1000,
+      });
+      if (batch.size === 0) break;
+      for (const [key, event] of batch) {
+        cursor = key;
+        yield event;
+      }
+      if (batch.size < 1000) break;
+    }
   }
 }
