@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv } from '../lib/auth';
-import { authenticate } from '../lib/auth';
+import { authenticate, generateApiKey, hashApiKey } from '../lib/auth';
+import { rateLimit } from '../lib/rate-limit';
 import { ApiError, errorBody } from '../lib/errors';
 import { canonicalize } from '../lib/hash';
+import { log } from '../lib/log';
 import { streamStub } from '../do/stream';
 
 /**
@@ -20,10 +22,46 @@ const app = new Hono<AppEnv>();
 app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // ---------------------------------------------------------------------------
-// /v1/streams — every route requires a valid bearer key.
+// POST /v1/keys — admin-only key minting, guarded by ADMIN_SECRET.
+// Not bearer-authed and not rate-limited (it predates any key).
+// ---------------------------------------------------------------------------
+app.post('/v1/keys', async (c) => {
+  if (c.req.header('X-Admin-Secret') !== c.env.ADMIN_SECRET) {
+    throw new ApiError(403, 'forbidden', 'Invalid or missing admin secret');
+  }
+
+  let body: { name?: unknown; rate_per_min?: unknown } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    // Empty/invalid body is fine — fall back to defaults.
+  }
+
+  const name = typeof body.name === 'string' ? body.name : 'unnamed';
+  const ratePerMin =
+    typeof body.rate_per_min === 'number' && body.rate_per_min > 0
+      ? Math.floor(body.rate_per_min)
+      : 60;
+
+  const rawKey = generateApiKey();
+  const keyHash = await hashApiKey(rawKey);
+  await c.env.DB.prepare(
+    'INSERT INTO api_keys (key_hash, name, rate_per_min, created_at) VALUES (?, ?, ?, ?)',
+  )
+    .bind(keyHash, name, ratePerMin, Date.now())
+    .run();
+
+  log.info('key_minted', { name, ratePerMin });
+  // The raw key is returned exactly once and never stored in the clear.
+  return c.json({ key: rawKey, name, rate_per_min: ratePerMin }, 201);
+});
+
+// ---------------------------------------------------------------------------
+// /v1/streams — every route requires a valid bearer key and is rate-limited.
 // ---------------------------------------------------------------------------
 const streams = new Hono<AppEnv>();
 streams.use('*', authenticate);
+streams.use('*', rateLimit);
 
 /** Throw 404 (not 403) unless the authenticated key owns the stream. */
 async function requireOwnedStream(c: Context<AppEnv>, id: string): Promise<void> {
@@ -158,7 +196,9 @@ app.onError((err, c) => {
   if (err instanceof ApiError) {
     return c.json(errorBody(err.code, err.message), err.status);
   }
-  console.error('unhandled_error', err);
+  log.error('unhandled_error', {
+    message: err instanceof Error ? err.message : String(err),
+  });
   return c.json(errorBody('internal_error', 'Internal server error'), 500);
 });
 
