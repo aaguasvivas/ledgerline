@@ -12,7 +12,9 @@ import { rateLimiterStub } from '../do/rate-limiter';
  */
 export async function rateLimit(c: Context<AppEnv>, next: Next): Promise<void> {
   const keyHash = c.get('keyHash');
-  const ratePerMin = c.get('ratePerMin');
+  // Defense in depth: a stored rate of 0 or less would make refill math
+  // degenerate (division by zero → non-finite Retry-After). Clamp to >= 1.
+  const ratePerMin = Math.max(1, Math.floor(c.get('ratePerMin')));
 
   const { allowed, remaining, retryAfterMs } = await rateLimiterStub(
     c.env,

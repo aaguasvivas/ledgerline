@@ -28,6 +28,29 @@ export function generateApiKey(): string {
   return KEY_PREFIX + hex;
 }
 
+/** Length-checked, constant-time string comparison (no early exit on mismatch). */
+function timingSafeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  if (ea.length !== eb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
+}
+
+/**
+ * Validate an admin secret. Fails closed: returns false when the expected
+ * secret is unconfigured or the provided one is missing, and otherwise compares
+ * in constant time.
+ */
+export function verifyAdminSecret(
+  provided: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (!expected || !provided) return false;
+  return timingSafeEqual(provided, expected);
+}
+
 interface ApiKeyRow {
   key_hash: string;
   name: string;

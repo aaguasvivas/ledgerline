@@ -4,7 +4,7 @@
 
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)
 ![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-39%20passing-3FB950)
+![Tests](https://img.shields.io/badge/tests-44%20passing-3FB950)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 > Replace the CI badge once a remote is set:
@@ -241,7 +241,7 @@ A map from each component to the interview concept it demonstrates:
 Tests run inside the **real Workers runtime** (`workerd` via Miniflare and `@cloudflare/vitest-pool-workers`) against actual Durable Objects and a local D1 — not mocks. Built test-first.
 
 ```bash
-npm test            # 39 tests, 9 files
+npm test            # 44 tests, 11 files
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit (strict)
 ```
@@ -308,7 +308,7 @@ src/
     log.ts              structured JSON logger
 migrations/0001_init.sql  D1 read-model schema
 scripts/seed.mjs          mint a key into local/remote D1
-test/                     39 tests across 9 files
+test/                     44 tests across 11 files
 ```
 
 ---

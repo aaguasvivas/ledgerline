@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
-import { genesisHash, nextHash } from '../lib/hash';
+import { canonicalize, genesisHash, nextHash } from '../lib/hash';
 
 /** Per-stream metadata; the O(1) head of the log. */
 interface Meta {
@@ -35,6 +35,12 @@ export interface AppendResult {
   hash: string;
   prevHash: string;
   createdAt: number;
+  /**
+   * Canonical JSON of the authoritative payload. On a replay this is the
+   * ORIGINAL event's payload (not the retried body), so a mirror always matches
+   * `hash`. A string (not `unknown`) keeps the RPC return type serializable.
+   */
+  canonicalPayload: string;
   /** True when this call replayed an existing event for a repeated key. */
   replay: boolean;
 }
@@ -124,6 +130,7 @@ export class StreamDO extends DurableObject<Env> {
           hash: prior.hash,
           prevHash: event!.prevHash,
           createdAt: event!.createdAt,
+          canonicalPayload: canonicalize(event!.payload),
           replay: true,
         };
       }
@@ -146,7 +153,14 @@ export class StreamDO extends DurableObject<Env> {
         [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
       });
 
-      return { seq, hash, prevHash, createdAt, replay: false };
+      return {
+        seq,
+        hash,
+        prevHash,
+        createdAt,
+        canonicalPayload: canonicalize(payload),
+        replay: false,
+      };
     });
   }
 

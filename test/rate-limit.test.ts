@@ -51,4 +51,14 @@ describe('rate limiting', () => {
 
     expect((await c.fetch(`/v1/streams/${id}/head`)).status).toBe(200);
   });
+
+  it('clamps a non-positive rate to a sane minimum (never emits a non-finite Retry-After)', async () => {
+    const c = client(await seedKey({ ratePerMin: 0 }));
+    const r1 = await c.fetch('/v1/streams', { method: 'POST' }); // clamped → allowed
+    const r2 = await c.fetch('/v1/streams', { method: 'POST' }); // bucket empty
+
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(429);
+    expect(Number.isFinite(Number(r2.headers.get('Retry-After')))).toBe(true);
+  });
 });

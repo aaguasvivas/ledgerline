@@ -1,10 +1,14 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { AppEnv } from '../lib/auth';
-import { authenticate, generateApiKey, hashApiKey } from '../lib/auth';
+import {
+  authenticate,
+  generateApiKey,
+  hashApiKey,
+  verifyAdminSecret,
+} from '../lib/auth';
 import { rateLimit } from '../lib/rate-limit';
 import { ApiError, errorBody } from '../lib/errors';
-import { canonicalize } from '../lib/hash';
 import { log } from '../lib/log';
 import { streamStub } from '../do/stream';
 import { LANDING_HTML } from './landing';
@@ -30,7 +34,9 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 // Not bearer-authed and not rate-limited (it predates any key).
 // ---------------------------------------------------------------------------
 app.post('/v1/keys', async (c) => {
-  if (c.req.header('X-Admin-Secret') !== c.env.ADMIN_SECRET) {
+  // Fail closed: rejects when the header is missing AND when ADMIN_SECRET is
+  // not configured (otherwise undefined === undefined would open the endpoint).
+  if (!verifyAdminSecret(c.req.header('X-Admin-Secret'), c.env.ADMIN_SECRET)) {
     throw new ApiError(403, 'forbidden', 'Invalid or missing admin secret');
   }
 
@@ -126,7 +132,9 @@ streams.post('/:id/events', async (c) => {
       result.seq,
       result.hash,
       result.prevHash,
-      canonicalize(payload),
+      // The DO returns the authoritative canonical payload (the original event
+      // on a replay), so the stored payload always hashes to result.hash.
+      result.canonicalPayload,
       result.createdAt,
     )
     .run();
