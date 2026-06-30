@@ -50,6 +50,21 @@ function idemKey(key: string): string {
   return `idem:${key}`;
 }
 
+/** Per-minute rollup bucket key (minute = floor(epochMs / 60000)). */
+function bucketKey(minute: number): string {
+  return `bucket:${minute}`;
+}
+
+/** Typed handle to the StreamDO for a given stream id. */
+export function streamStub(
+  env: Env,
+  streamId: string,
+): DurableObjectStub<StreamDO> {
+  return env.STREAM.get(
+    env.STREAM.idFromName(streamId),
+  ) as unknown as DurableObjectStub<StreamDO>;
+}
+
 /**
  * StreamDO — one instance per stream; the authoritative source of truth for
  * ordering and integrity.
@@ -119,10 +134,15 @@ export class StreamDO extends DurableObject<Env> {
       const createdAt = Date.now();
       const event: StoredEvent = { seq, prevHash, hash, payload, createdAt };
 
-      // One batched put → atomic commit of all three keys.
+      const minute = Math.floor(createdAt / 60000);
+      const bucketCount =
+        (await this.ctx.storage.get<number>(bucketKey(minute))) ?? 0;
+
+      // One batched put → atomic commit of every key this append touches.
       await this.ctx.storage.put({
         [eventKey(seq)]: event,
         [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
+        [bucketKey(minute)]: bucketCount + 1,
         [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
       });
 
@@ -135,6 +155,30 @@ export class StreamDO extends DurableObject<Env> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     if (!meta) throw new Error('stream not initialized');
     return { count: meta.count, headHash: meta.headHash };
+  }
+
+  /**
+   * Time-series rollup: total event count plus per-minute counts for the last
+   * 60 minutes (only minutes with activity are returned), ascending by minute.
+   */
+  async stats(): Promise<{
+    total: number;
+    perMinute: { minute: number; count: number }[];
+  }> {
+    const meta = await this.ctx.storage.get<Meta>(META_KEY);
+    const total = meta?.count ?? 0;
+
+    const windowStart = Math.floor(Date.now() / 60000) - 59;
+    const buckets = await this.ctx.storage.list<number>({ prefix: 'bucket:' });
+
+    const perMinute: { minute: number; count: number }[] = [];
+    for (const [key, count] of buckets) {
+      const minute = Number(key.slice('bucket:'.length));
+      if (minute >= windowStart) perMinute.push({ minute, count });
+    }
+    perMinute.sort((a, b) => a.minute - b.minute);
+
+    return { total, perMinute };
   }
 
   /**
