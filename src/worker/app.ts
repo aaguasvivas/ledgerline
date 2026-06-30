@@ -7,6 +7,7 @@ import { ApiError, errorBody } from '../lib/errors';
 import { canonicalize } from '../lib/hash';
 import { log } from '../lib/log';
 import { streamStub } from '../do/stream';
+import { LANDING_HTML } from './landing';
 
 /**
  * The Ledgerline HTTP API.
@@ -17,6 +18,9 @@ import { streamStub } from '../do/stream';
  * eventually-consistent query side (CQRS).
  */
 const app = new Hono<AppEnv>();
+
+/** Tiny static landing page. */
+app.get('/', (c) => c.html(LANDING_HTML));
 
 /** Liveness probe — unauthenticated, no rate limit. */
 app.get('/health', (c) => c.json({ status: 'ok' }));

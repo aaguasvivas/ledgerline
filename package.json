@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "migrate:local": "wrangler d1 migrations apply ledgerline --local",
+    "migrate": "wrangler d1 migrations apply ledgerline --remote",
     "seed": "node scripts/seed.mjs"
   },
   "license": "MIT",
