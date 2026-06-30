@@ -1,0 +1,28 @@
+{
+  "name": "ledgerline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Edge-native, append-only event streams with exactly-once appends, strong per-stream ordering, and a tamper-evident SHA-256 hash-chained audit log — on Cloudflare Workers.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "seed": "node scripts/seed.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "hono": "^4.12.27"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "@cloudflare/workers-types": "^4.20260630.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.105.0"
+  }
+}
