@@ -34,7 +34,7 @@ export const LANDING_HTML = `<!doctype html>
   </ul>
   <footer>
     API base: <code>/v1</code> &middot; health: <code>GET /health</code> &middot;
-    docs: <a href="https://github.com/">README</a>
+    verify: <code>GET /v1/streams/:id/verify</code> &middot; docs: <code>README.md</code>
   </footer>
 </main>
 </body>

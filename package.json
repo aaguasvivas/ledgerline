@@ -15,6 +15,7 @@
     "seed": "node scripts/seed.mjs"
   },
   "license": "MIT",
+  "author": "Adelson Aguasvivas <aaguasvivas907@gmail.com>",
   "engines": {
     "node": ">=22"
   },
