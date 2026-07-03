@@ -77,6 +77,32 @@ describe('POST /v1/streams/:id/events', () => {
   });
 });
 
+describe('unicode payloads end-to-end', () => {
+  it('round-trips through DO storage and D1 with a recomputable hash', async () => {
+    const id = await api.createStream();
+    const payload = { note: 'café ✅ — 分散台帳', emoji: '🚀🔗' };
+
+    const appended = (await (
+      await api.append(id, payload, 'uni-1')
+    ).json()) as { seq: number; hash: string };
+
+    const body = (await (
+      await api.fetch(`/v1/streams/${id}/events`)
+    ).json()) as { events: { seq: number; hash: string; payload: unknown }[] };
+    expect(body.events[0].payload).toEqual(payload);
+
+    // The read model's payload recomputes to the stored hash byte-for-byte —
+    // the independent-auditability contract.
+    const { genesisHash, nextHash } = await import('../src/lib/hash');
+    const recomputed = await nextHash(await genesisHash(id), body.events[0].payload, 1);
+    expect(recomputed).toBe(appended.hash);
+
+    expect(await (await api.fetch(`/v1/streams/${id}/verify`)).json()).toEqual({
+      valid: true,
+    });
+  });
+});
+
 describe('GET /v1/streams/:id/head', () => {
   it('returns count and head hash', async () => {
     const id = await api.createStream();

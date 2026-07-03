@@ -47,6 +47,25 @@ describe('canonicalize', () => {
   });
 });
 
+describe('canonical unicode contract', () => {
+  // External verifiers must reproduce these bytes exactly. JS JSON.stringify
+  // emits non-ASCII unescaped (unlike e.g. Python's ensure_ascii default);
+  // this pin makes any change to string serialization a loud test failure,
+  // because it would silently re-hash every existing chain.
+  it('emits non-ASCII characters unescaped [known answer]', () => {
+    expect(canonicalize({ m: 'héllo 🚀', cjk: '分散台帳' })).toBe(
+      '{"cjk":"分散台帳","m":"héllo 🚀"}',
+    );
+  });
+
+  it('hashes a unicode payload to a pinned vector [known answer]', async () => {
+    const g = await genesisHash('unicode-stream');
+    expect(await nextHash(g, { m: 'héllo 🚀', cjk: '分散台帳' }, 1)).toBe(
+      'adcc8b06f64d591edb552cefce45aa6bb423eb97090a9de6b451d17d57352d5f',
+    );
+  });
+});
+
 describe('sha256Hex', () => {
   it('produces lowercase 64-char hex', async () => {
     expect(await sha256Hex('ledgerline')).toMatch(/^[0-9a-f]{64}$/);
