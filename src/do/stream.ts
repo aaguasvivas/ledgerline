@@ -142,16 +142,24 @@ export class StreamDO extends DurableObject<Env> {
       const event: StoredEvent = { seq, prevHash, hash, payload, createdAt };
 
       const minute = Math.floor(createdAt / 60000);
-      const bucketCount =
-        (await this.ctx.storage.get<number>(bucketKey(minute))) ?? 0;
+      const existingBucket = await this.ctx.storage.get<number>(
+        bucketKey(minute),
+      );
 
       // One batched put → atomic commit of every key this append touches.
       await this.ctx.storage.put({
         [eventKey(seq)]: event,
         [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
-        [bucketKey(minute)]: bucketCount + 1,
+        [bucketKey(minute)]: (existingBucket ?? 0) + 1,
         [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
       });
+
+      // First append of a new minute: drop rollup buckets that have aged out
+      // of the stats window, keeping bucket storage bounded (~60 keys) instead
+      // of growing one key per active minute forever.
+      if (existingBucket === undefined) {
+        await this.pruneBuckets(minute - 59);
+      }
 
       return {
         seq,
@@ -226,6 +234,19 @@ export class StreamDO extends DurableObject<Env> {
       return { valid: false, brokenAt: lastSeq + 1 };
     }
     return { valid: true };
+  }
+
+  /** Delete rollup buckets for minutes before `oldestKept`. */
+  private async pruneBuckets(oldestKept: number): Promise<void> {
+    const buckets = await this.ctx.storage.list<number>({ prefix: 'bucket:' });
+    const stale: string[] = [];
+    for (const key of buckets.keys()) {
+      if (Number(key.slice('bucket:'.length)) < oldestKept) stale.push(key);
+    }
+    // storage.delete accepts at most 128 keys per call.
+    for (let i = 0; i < stale.length; i += 128) {
+      await this.ctx.storage.delete(stale.slice(i, i + 128));
+    }
   }
 
   /** Yield every stored event in ascending seq order, paginating storage. */

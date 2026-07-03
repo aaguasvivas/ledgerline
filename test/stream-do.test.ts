@@ -59,6 +59,51 @@ describe('StreamDO exactly-once (idempotency)', () => {
   });
 });
 
+describe('StreamDO rollup buckets', () => {
+  it('prunes buckets older than the 60-minute window on the first append of a minute', async () => {
+    const stub = streamStub('prune-stream');
+    await stub.create('prune-stream');
+
+    // Seed one clearly-stale and one clearly-in-window bucket. Generous margins
+    // (-90 / -30) keep the test immune to a minute boundary ticking mid-test.
+    const nowMinute = Math.floor(Date.now() / 60000);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(`bucket:${nowMinute - 90}`, 7);
+      await state.storage.put(`bucket:${nowMinute - 30}`, 4);
+    });
+
+    await stub.append({ a: 1 }, 'prune-1'); // first append of this minute
+
+    const keys = await runInDurableObject(stub, async (_instance, state) => {
+      const buckets = await state.storage.list({ prefix: 'bucket:' });
+      return [...buckets.keys()];
+    });
+    expect(keys).not.toContain(`bucket:${nowMinute - 90}`);
+    expect(keys).toContain(`bucket:${nowMinute - 30}`);
+
+    // stats reflects the surviving seeded bucket plus the fresh append.
+    const stats = await stub.stats();
+    expect(stats.perMinute.reduce((acc, b) => acc + b.count, 0)).toBe(5);
+  });
+
+  it('stats window includes a bucket exactly 59 minutes old and excludes 60', async () => {
+    const stub = streamStub('window-stream');
+    await stub.create('window-stream');
+
+    // Seed and read inside one DO callback so the boundary math uses the same
+    // clock within a sub-millisecond window.
+    const stats = await runInDurableObject(stub, async (instance, state) => {
+      const nowMinute = Math.floor(Date.now() / 60000);
+      await state.storage.put(`bucket:${nowMinute - 59}`, 3);
+      await state.storage.put(`bucket:${nowMinute - 60}`, 9);
+      return (instance as StreamDO).stats();
+    });
+
+    expect(stats.perMinute.some((b) => b.count === 3)).toBe(true);
+    expect(stats.perMinute.some((b) => b.count === 9)).toBe(false);
+  });
+});
+
 describe('StreamDO hash-chain integrity', () => {
   it('verifies an untampered chain', async () => {
     const stub = streamStub('verify-ok-stream');
