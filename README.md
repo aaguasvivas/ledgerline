@@ -4,7 +4,7 @@
 
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)
 ![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-44%20passing-3FB950)
+![Tests](https://img.shields.io/badge/tests-68%20passing-3FB950)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 > Replace the CI badge once a remote is set:
@@ -126,7 +126,7 @@ All `/v1/streams/*` endpoints require `Authorization: Bearer <api-key>` and are 
 { "error": { "code": "stream_not_found", "message": "Stream not found" } }
 ```
 
-Status codes: `400` bad request · `401` unauthenticated · `403` admin-forbidden · `404` not found / not owned · `409` reserved · `429` rate-limited.
+Status codes: `400` bad request · `401` unauthenticated · `403` admin-forbidden · `404` not found / not owned · `409` reserved · `413` payload too large · `429` rate-limited.
 
 ### `GET /health`
 Liveness probe; unauthenticated. → `{ "status": "ok" }`
@@ -155,7 +155,9 @@ curl -X POST $BASE/v1/streams/$SID/events -H "Authorization: Bearer $KEY" \
 # → 201 {"seq":2,"hash":"68984989…"}
 ```
 - A **repeated** `Idempotency-Key` returns the original `{seq, hash}` with `200` and response header `Idempotent-Replay: true`; no new event is appended.
-- Missing `Idempotency-Key` → `400 idempotency_key_required`.
+- Missing `Idempotency-Key` → `400 idempotency_key_required`; over 256 chars → `400 idempotency_key_invalid`.
+- **Limits** (explicit product caps, enforced as typed errors at the edge): body ≤ 256 KiB (`413 payload_too_large`), nesting ≤ 64 levels (`400 payload_too_deep`), all numbers finite (`400 invalid_payload` — JSON `1e999` would otherwise silently become `null`).
+- Idempotency keys are retained for the **life of the stream** — a key permanently maps to its original event (this is what makes retries safe at any later time, unlike TTL-based schemes).
 
 ### `GET /v1/streams/:id/events?after=<seq>&limit=<n>` — paginated read (D1)
 `after` defaults to `0`, `limit` defaults to `50` (max `200`).
@@ -178,7 +180,7 @@ curl -X POST $BASE/v1/streams/$SID/events -H "Authorization: Bearer $KEY" \
 (`minute` = `floor(epochMs / 60000)`; only the last 60 minutes with activity are returned.)
 
 ### `GET /v1/streams/:id/verify` — recompute the chain (authoritative)
-Recomputes the hash chain from genesis over the Durable Object's events.
+Recomputes the hash chain from genesis over the Durable Object's events, then checks the recomputed head against `meta` (event count + head hash) — so **tail truncation** (the classic ledger rollback) is caught, not just in-place edits.
 → `{ "valid": true }` or `{ "valid": false, "brokenAt": 2 }`
 
 ---
@@ -193,7 +195,11 @@ hash_0 (genesis) = SHA-256("ledgerline:v1:" + streamId)                         
 hash_n           = SHA-256(hash_{n-1} + "|" + canonicalJSON(payload_n) + "|" + n)  (hex)
 ```
 
-Each stored event keeps both `prevHash` and `hash`. `verify` walks from genesis, recomputing each link; the first `seq` whose recomputed hash ≠ stored hash is reported as `brokenAt`. Because every link folds in the previous hash, altering event *k* invalidates *k* and everything after it — exactly the property a Merkle-style chain gives an audit log. Canonical JSON guarantees the hash is independent of key ordering, so re-serialization never produces a false positive.
+Each stored event keeps both `prevHash` and `hash`. `verify` walks from genesis, recomputing each link; the first `seq` whose recomputed hash ≠ stored hash is reported as `brokenAt`. After the walk it compares the recomputed head against the stream's `meta` (count + head hash), so a **truncated tail** — a clean-looking prefix with the newest events deleted — is also reported as broken. Because every link folds in the previous hash, altering event *k* invalidates *k* and everything after it — exactly the property a Merkle-style chain gives an audit log. Canonical JSON guarantees the hash is independent of key ordering, so re-serialization never produces a false positive.
+
+**For external verifiers**, the canonical form is pinned by known-answer tests:
+- Strings are serialized as ECMAScript `JSON.stringify` emits them: non-ASCII characters **unescaped** (`"héllo 🚀"`, not `\uXXXX`). Python users: `json.dumps(..., ensure_ascii=False, separators=(",", ":"), sort_keys=True)` matches.
+- Numbers are IEEE-754 doubles in ECMAScript number-to-string form (`-0` serializes as `0`, `1e21` as `1e+21`); integers beyond 2^53 lose precision at `JSON.parse` like any JS service. Non-finite values are rejected at the API boundary, so every stored number round-trips.
 
 ---
 
@@ -207,10 +213,10 @@ The Durable Object is the **source of truth**; D1 is an **eventually-consistent 
 - Writes need strong ordering and atomicity → Durable Object.
 - Reads need rich querying, pagination, and horizontal read scale → D1/SQLite.
 
-The trade-off is that the read model can lag the write side by a few milliseconds. Ledgerline manages this honestly: `head`, `stats`, and `verify` answer from the **authoritative** Durable Object, while `events` (bulk pagination) serves from D1. Mirroring uses `INSERT OR IGNORE` keyed on `(stream_id, seq)`, which makes the projection **idempotent and self-healing** — a retried request, or a re-mirror after a transient D1 failure, can never duplicate a row.
+The trade-off is that the read model can lag the write side by a few milliseconds. Ledgerline manages this honestly: `head`, `stats`, and `verify` answer from the **authoritative** Durable Object, while `events` (bulk pagination) serves from D1. The mirror is deliberately **best-effort on the request path**: once the Durable Object has committed, a D1 failure is logged (`mirror_failed`) and the client still receives its authoritative `{seq, hash}` — failing the request for a non-authoritative projection would tell the client its durable write didn't happen. Mirroring uses `INSERT OR IGNORE` keyed on `(stream_id, seq)`, so a retry of the same `Idempotency-Key` re-mirrors the identical row and heals the gap without ever duplicating one.
 
 **Why idempotency keys give exactly-once under retries.**
-"Exactly-once delivery" is impossible over an unreliable network, but **exactly-once *effect*** is achievable: make the write idempotent and let the client retry safely. The Durable Object stores `idem:{key} → {seq, hash}` per stream. The first append records it inside the same atomic commit as the event; any later append with that key short-circuits to the stored result. The key is authoritative — a retry returns the original event even if the payload differs — which is the standard idempotency-key contract.
+"Exactly-once delivery" is impossible over an unreliable network, but **exactly-once *effect*** is achievable: make the write idempotent and let the client retry safely. The Durable Object stores `idem:{key} → {seq, hash}` per stream. The first append records it inside the same atomic commit as the event; any later append with that key short-circuits to the stored result. The key is authoritative — a retry returns the original event even if the payload differs — and records never expire: unlike TTL-based schemes (e.g. Stripe's 24 h window), a key is reserved for the stream's lifetime, so storage grows with the event log the ledger keeps anyway.
 
 **Tamper-evidence as a first-class feature.**
 Storing events is easy; proving they weren't edited after the fact is the point. The hash chain turns the log into content-addressed, append-only data: the head hash commits to the entire history, and `verify` gives a cheap, total integrity check with a precise failure location.
@@ -241,21 +247,24 @@ A map from each component to the interview concept it demonstrates:
 Tests run inside the **real Workers runtime** (`workerd` via Miniflare and `@cloudflare/vitest-pool-workers`) against actual Durable Objects and a local D1 — not mocks. Built test-first.
 
 ```bash
-npm test            # 44 tests, 11 files
+npm test            # 68 tests, 13 files
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit (strict)
 ```
 
-What's covered (the six guarantees from the spec, plus the surrounding surface):
+What's covered (the six core guarantees, plus the surface an adversarial audit said mattered):
 
-1. **Exactly-once** — a repeated `Idempotency-Key` yields one event, identical `{seq, hash}`, and `Idempotent-Replay: true`.
-2. **Ordering** — many appends produce strictly increasing, contiguous `seq` from 1.
-3. **Hash-chain integrity** — tampering with a stored payload makes `verify` return `{ valid: false, brokenAt: <seq> }`; an untouched chain returns `{ valid: true }`.
+1. **Exactly-once** — a repeated `Idempotency-Key` yields one event, identical `{seq, hash}`, and `Idempotent-Replay: true` — including **5 requests in flight simultaneously** racing one key.
+2. **Ordering** — sequential *and* 20 concurrent in-flight appends produce strictly increasing, contiguous `seq` from 1.
+3. **Hash-chain integrity** — tampering with a stored payload makes `verify` return `{ valid: false, brokenAt: <seq> }`; deleting the trailing event (truncation) is caught; an untouched chain returns `{ valid: true }`.
 4. **Rate limiting** — exhausting a key's bucket returns `429`; tokens refill over time (token-bucket math unit-tested with injected time for determinism).
-5. **Auth** — missing/invalid bearer → `401`; another key's stream → `404` (no existence leak).
-6. **Read model** — events and stats appear via the API after an append.
+5. **Auth** — missing/invalid bearer → `401`; another key's stream → `404` (no existence leak); admin guard fails closed when the secret is unset.
+6. **Read model** — events and stats appear via the API after an append; a replayed key mirrors the *original* payload; a failed mirror doesn't fail a committed append.
+7. **Durability** — state survives Durable Object eviction: seq continues, idempotency records replay, drained rate buckets stay drained.
+8. **Input limits** — oversized/too-deep/non-finite payloads and oversized keys fail as typed 4xx errors, never 500s.
+9. **Canonical-form contract** — known-answer SHA-256 vectors, `__proto__` round-trip fidelity, and unescaped-unicode bytes are all pinned for external verifiers.
 
-Plus known-answer tests for the SHA-256 chain and canonical JSON, and the admin key-minting flow. CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push.
+CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push to `main` and on every pull request.
 
 ---
 
@@ -293,6 +302,7 @@ node scripts/seed.mjs --remote --name first-key --rate 120
 ```
 src/
   index.ts              Worker entry: exports the app + Durable Objects
+  types.ts              shared Env bindings (STREAM, RATE_LIMITER, DB, ADMIN_SECRET)
   worker/
     app.ts              Hono routes, auth/rate-limit wiring, CQRS mirroring
     landing.ts          tiny static landing page
@@ -304,11 +314,12 @@ src/
     token-bucket.ts     pure, time-injected rate-limit math
     auth.ts             key hashing + bearer-auth middleware
     rate-limit.ts       rate-limit middleware
+    validate.ts         payload/key limits (size, depth, finiteness)
     errors.ts           ApiError + JSON error envelope
     log.ts              structured JSON logger
 migrations/0001_init.sql  D1 read-model schema
 scripts/seed.mjs          mint a key into local/remote D1
-test/                     44 tests across 11 files
+test/                     68 tests across 13 files
 ```
 
 ---
