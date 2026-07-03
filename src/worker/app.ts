@@ -9,6 +9,11 @@ import {
 } from '../lib/auth';
 import { rateLimit } from '../lib/rate-limit';
 import { ApiError, errorBody } from '../lib/errors';
+import {
+  MAX_PAYLOAD_BYTES,
+  assertIdempotencyKey,
+  assertPayloadShape,
+} from '../lib/validate';
 import { log } from '../lib/log';
 import { streamStub } from '../do/stream';
 import { LANDING_HTML } from './landing';
@@ -108,16 +113,27 @@ streams.post('/:id/events', async (c) => {
       'Idempotency-Key header is required',
     );
   }
+  assertIdempotencyKey(idempotencyKey);
 
   const id = c.req.param('id');
   await requireOwnedStream(c, id);
 
+  const raw = await c.req.text();
+  if (new TextEncoder().encode(raw).length > MAX_PAYLOAD_BYTES) {
+    throw new ApiError(
+      413,
+      'payload_too_large',
+      `Payload exceeds ${MAX_PAYLOAD_BYTES} bytes`,
+    );
+  }
+
   let payload: unknown;
   try {
-    payload = await c.req.json();
+    payload = JSON.parse(raw);
   } catch {
     throw new ApiError(400, 'invalid_payload', 'Request body must be valid JSON');
   }
+  assertPayloadShape(payload);
 
   const result = await streamStub(c.env, id).append(payload, idempotencyKey);
 
