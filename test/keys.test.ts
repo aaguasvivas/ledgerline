@@ -31,6 +31,48 @@ describe('POST /v1/keys (admin)', () => {
     expect(created.status).toBe(201);
   });
 
+  it('rejects a fractional rate_per_min with 400 instead of storing 0', async () => {
+    const res = await fetchApi('/v1/keys', {
+      method: 'POST',
+      headers: { 'X-Admin-Secret': ADMIN_SECRET, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'frac', rate_per_min: 0.5 }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('invalid_rate');
+  });
+
+  it('rejects a non-finite rate_per_min (JSON 1e999) with 400 instead of 500', async () => {
+    const res = await fetchApi('/v1/keys', {
+      method: 'POST',
+      headers: { 'X-Admin-Secret': ADMIN_SECRET, 'Content-Type': 'application/json' },
+      body: '{"name":"inf","rate_per_min":1e999}',
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a name over 128 chars with 400', async () => {
+    const res = await fetchApi('/v1/keys', {
+      method: 'POST',
+      headers: { 'X-Admin-Secret': ADMIN_SECRET, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'n'.repeat(200) }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('invalid_name');
+  });
+
+  it('defaults rate_per_min to 60 when omitted', async () => {
+    const res = await fetchApi('/v1/keys', {
+      method: 'POST',
+      headers: { 'X-Admin-Secret': ADMIN_SECRET, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'default-rate' }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { rate_per_min: number };
+    expect(body.rate_per_min).toBe(60);
+  });
+
   it('rejects a wrong admin secret with 403', async () => {
     const res = await fetchApi('/v1/keys', {
       method: 'POST',

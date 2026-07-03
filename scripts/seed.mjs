@@ -17,12 +17,26 @@ import { execFileSync } from 'node:child_process';
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
-  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+  const value = i >= 0 ? process.argv[i + 1] : undefined;
+  // A following flag is not a value: `--name --remote` must not create a key
+  // literally named "--remote" (while also targeting the remote database).
+  if (value === undefined || value.startsWith('--')) {
+    if (i >= 0) {
+      console.error(`error: ${flag} requires a value`);
+      process.exit(1);
+    }
+    return fallback;
+  }
+  return value;
 }
 
 const remote = process.argv.includes('--remote');
 const name = arg('--name', 'seed-key');
 const ratePerMin = Number(arg('--rate', '120'));
+if (!Number.isInteger(ratePerMin) || ratePerMin < 1) {
+  console.error('error: --rate must be a positive integer');
+  process.exit(1);
+}
 
 const rawKey = 'lk_' + randomBytes(24).toString('hex');
 const keyHash = createHash('sha256').update(rawKey, 'utf8').digest('hex');

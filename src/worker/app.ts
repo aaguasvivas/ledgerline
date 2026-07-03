@@ -53,10 +53,29 @@ app.post('/v1/keys', async (c) => {
   }
 
   const name = typeof body.name === 'string' ? body.name : 'unnamed';
-  const ratePerMin =
-    typeof body.rate_per_min === 'number' && body.rate_per_min > 0
-      ? Math.floor(body.rate_per_min)
-      : 60;
+  if (name.length > 128) {
+    throw new ApiError(400, 'invalid_name', 'name must be at most 128 characters');
+  }
+
+  // Missing rate defaults to 60; an explicitly provided rate must be a finite
+  // positive integer — floor BEFORE validating so 0.5 cannot slip through as 0,
+  // and non-finite values (JSON 1e999 parses to Infinity) get a 400, not a 500
+  // from the D1 bind.
+  let ratePerMin = 60;
+  if (body.rate_per_min !== undefined) {
+    const rate =
+      typeof body.rate_per_min === 'number'
+        ? Math.floor(body.rate_per_min)
+        : NaN;
+    if (!Number.isFinite(rate) || rate < 1) {
+      throw new ApiError(
+        400,
+        'invalid_rate',
+        'rate_per_min must be a positive integer',
+      );
+    }
+    ratePerMin = rate;
+  }
 
   const rawKey = generateApiKey();
   const keyHash = await hashApiKey(rawKey);
@@ -250,10 +269,15 @@ app.onError((err, c) => {
   return c.json(errorBody('internal_error', 'Internal server error'), 500);
 });
 
-/** Parse an integer query param, falling back to a default. */
+/**
+ * Parse an integer query param, falling back to a default. Number() rather
+ * than parseInt(): "1e3" is 1000, not 1, and any trailing garbage ("12abc")
+ * is rejected wholesale instead of silently truncated.
+ */
 function toInt(value: string | undefined, fallback: number): number {
-  const n = Number.parseInt(value ?? '', 10);
-  return Number.isNaN(n) ? fallback : n;
+  if (value === undefined || value === '') return fallback;
+  const n = Number(value);
+  return Number.isInteger(n) ? n : fallback;
 }
 
 export { app };

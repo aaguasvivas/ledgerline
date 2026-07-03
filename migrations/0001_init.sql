@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS streams (
   created_at     INTEGER NOT NULL
 );
 
+-- Reserved for a future "list my streams" query; the current code only looks
+-- streams up by primary key.
 CREATE INDEX IF NOT EXISTS idx_streams_owner ON streams (owner_key_hash);
 
 -- Mirrored events. (stream_id, seq) is unique, so re-mirroring an idempotent
@@ -34,7 +36,7 @@ CREATE TABLE IF NOT EXISTS events (
   prev_hash  TEXT NOT NULL,
   payload    TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  -- The composite PK also serves the one read pattern
+  -- (WHERE stream_id = ? AND seq > ? ORDER BY seq): no secondary index needed.
   PRIMARY KEY (stream_id, seq)
 );
-
-CREATE INDEX IF NOT EXISTS idx_events_stream_seq ON events (stream_id, seq);

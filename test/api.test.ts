@@ -114,10 +114,27 @@ describe('GET /v1/streams/:id/events (D1 read model)', () => {
     expect(page2.nextAfter).toBeNull();
   });
 
-  it('caps limit at 200 and defaults to 50', async () => {
+  it('clamps and defaults pagination params (real assertions, 55-event stream)', async () => {
     const id = await api.createStream();
-    const res = await api.fetch(`/v1/streams/${id}/events?limit=9999`);
-    expect(res.status).toBe(200);
+    for (let i = 0; i < 55; i++) await api.append(id, { i }, `p-${i}`);
+
+    const page = async (query: string) =>
+      (await (
+        await api.fetch(`/v1/streams/${id}/events${query}`)
+      ).json()) as { events: { seq: number }[] };
+
+    // Default limit is 50.
+    expect((await page('')).events).toHaveLength(50);
+    // Garbage limit falls back to the default.
+    expect((await page('?limit=abc')).events).toHaveLength(50);
+    // limit is clamped up to at least 1 — and must not 500 on an empty page.
+    expect((await page('?limit=0')).events).toHaveLength(1);
+    expect((await page('?limit=-3')).events).toHaveLength(1);
+    // Exponent notation is a real number, not parseInt-truncated to 1.
+    expect((await page('?limit=1e3')).events).toHaveLength(55);
+    // Negative or garbage `after` starts from the beginning.
+    expect((await page('?after=-5&limit=1')).events[0].seq).toBe(1);
+    expect((await page('?after=abc&limit=1')).events[0].seq).toBe(1);
   });
 });
 

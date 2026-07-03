@@ -67,7 +67,9 @@ export async function authenticate(
   next: Next,
 ): Promise<void> {
   const header = c.req.header('Authorization') ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  // RFC 9110 §11.1: auth-scheme comparison is case-insensitive.
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  const token = match ? match[1].trim() : '';
   if (!token) {
     throw new ApiError(
       401,

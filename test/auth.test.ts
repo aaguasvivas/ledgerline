@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fetchApi, seededClient } from './helpers';
+import { fetchApi, seedKey, seededClient } from './helpers';
 
 // Spec test 5 — auth.
 describe('authentication', () => {
@@ -16,6 +16,15 @@ describe('authentication', () => {
       headers: { Authorization: 'Bearer lk_not_a_real_key' },
     });
     expect(res.status).toBe(401);
+  });
+
+  it('accepts a lowercase "bearer" scheme (RFC 9110: schemes are case-insensitive)', async () => {
+    const raw = await seedKey();
+    const res = await fetchApi('/v1/streams', {
+      method: 'POST',
+      headers: { Authorization: `bearer ${raw}` },
+    });
+    expect(res.status).toBe(201);
   });
 
   it('does not leak another key\'s stream: 404, not 403', async () => {
