@@ -24,6 +24,27 @@ describe('canonicalize', () => {
     expect(canonicalize(null)).toBe('null');
     expect(canonicalize(true)).toBe('true');
   });
+
+  // Regression: JSON.parse creates "__proto__" as an OWN property, and a naive
+  // rebuild onto {} triggers the prototype setter instead — silently dropping
+  // the key from the canonical form (hash collision + data loss).
+  it('preserves own "__proto__" keys from JSON.parse', () => {
+    const withProto = JSON.parse('{"__proto__":{"a":1},"b":2}');
+    expect(canonicalize(withProto)).toBe('{"__proto__":{"a":1},"b":2}');
+    // Round-trip stable: canonicalizing the canonical form is a fixed point.
+    expect(canonicalize(JSON.parse(canonicalize(withProto)))).toBe(
+      '{"__proto__":{"a":1},"b":2}',
+    );
+  });
+
+  it('hashes payloads that differ only in "__proto__" content differently', async () => {
+    const g = await genesisHash('s');
+    const a = await nextHash(g, JSON.parse('{"__proto__":{"x":1},"b":2}'), 1);
+    const b = await nextHash(g, JSON.parse('{"__proto__":{"x":2},"b":2}'), 1);
+    const c = await nextHash(g, JSON.parse('{"b":2}'), 1);
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(c);
+  });
 });
 
 describe('sha256Hex', () => {

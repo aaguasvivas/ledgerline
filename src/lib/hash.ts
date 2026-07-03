@@ -32,7 +32,11 @@ function sortDeep(value: unknown): unknown {
   }
   if (value !== null && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    // Null-prototype accumulator: JSON.parse can produce an OWN "__proto__"
+    // property, and assigning that key to a plain {} would invoke the inherited
+    // prototype setter — silently dropping the key from the canonical form. With
+    // no prototype there is no setter, so every key becomes an own data property.
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) {
       sorted[key] = sortDeep(source[key]);
     }
