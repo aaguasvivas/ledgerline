@@ -95,6 +95,12 @@ async function requireOwnedStream(c: Context<AppEnv>, id: string): Promise<void>
 streams.post('/', async (c) => {
   const id = crypto.randomUUID();
   await streamStub(c.env, id).create(id);
+  // Unlike the event mirror, this insert IS load-bearing (ownership checks
+  // read it), so a failure correctly fails the request. The client retries
+  // with a fresh UUID; the first DO's meta record is orphaned — an accepted,
+  // rare (~100-byte, infra-failure-only) cost of DO-first ordering, which is
+  // the safer direction: the reverse order would leave an owned stream whose
+  // authoritative state does not exist.
   await c.env.DB.prepare(
     'INSERT INTO streams (id, owner_key_hash, created_at) VALUES (?, ?, ?)',
   )
@@ -140,20 +146,34 @@ streams.post('/:id/events', async (c) => {
   // Project to the D1 read model. INSERT OR IGNORE makes this idempotent: an
   // idempotent replay (or a retried request after a prior mirror failure) is a
   // no-op or a self-heal, never a duplicate.
-  await c.env.DB.prepare(
-    'INSERT OR IGNORE INTO events (stream_id, seq, hash, prev_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  )
-    .bind(
-      id,
-      result.seq,
-      result.hash,
-      result.prevHash,
-      // The DO returns the authoritative canonical payload (the original event
-      // on a replay), so the stored payload always hashes to result.hash.
-      result.canonicalPayload,
-      result.createdAt,
+  //
+  // The DO write above is durable and authoritative; D1 is an eventually-
+  // consistent projection. A mirror failure therefore must not fail the
+  // request — the client would never learn its {seq, hash} for an event that
+  // exists. The gap heals on any retry of the same Idempotency-Key.
+  try {
+    await c.env.DB.prepare(
+      'INSERT OR IGNORE INTO events (stream_id, seq, hash, prev_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)',
     )
-    .run();
+      .bind(
+        id,
+        result.seq,
+        result.hash,
+        result.prevHash,
+        // The DO returns the authoritative canonical payload (the original
+        // event on a replay), so the stored payload always hashes to
+        // result.hash.
+        result.canonicalPayload,
+        result.createdAt,
+      )
+      .run();
+  } catch (err) {
+    log.error('mirror_failed', {
+      streamId: id,
+      seq: result.seq,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   if (result.replay) c.header('Idempotent-Replay', 'true');
   return c.json({ seq: result.seq, hash: result.hash }, result.replay ? 200 : 201);

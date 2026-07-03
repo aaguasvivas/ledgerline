@@ -40,4 +40,29 @@ describe('read-model integrity on idempotent replay', () => {
     );
     expect(recomputed).toBe(event.hash);
   });
+
+  // The DO is authoritative and its commit is durable; D1 is an eventually-
+  // consistent projection. A failed mirror write therefore must not turn a
+  // successful append into a 500 — the client would never learn its {seq, hash}
+  // even though the event exists.
+  it('append still succeeds when the D1 mirror write fails', async () => {
+    const api = await seededClient();
+    const id = await api.createStream();
+
+    // Simulate a D1 outage for the mirror INSERT. Isolated per-test storage
+    // restores the table for every other test.
+    await env.DB.exec('DROP TABLE events;');
+
+    const res = await api.append(id, { amount: 42 }, 'mirror-fail-1');
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { seq: number; hash: string };
+    expect(body.seq).toBe(1);
+    expect(body.hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // The authoritative write landed.
+    const head = (await (await api.fetch(`/v1/streams/${id}/head`)).json()) as {
+      count: number;
+    };
+    expect(head.count).toBe(1);
+  });
 });
