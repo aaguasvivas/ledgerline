@@ -87,4 +87,44 @@ describe('StreamDO hash-chain integrity', () => {
 
     expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
   });
+
+  // Tail truncation is the classic ledger rollback: deleting the trailing
+  // event(s) leaves a chain that recomputes cleanly. verify must compare the
+  // recomputed head against meta (count + headHash) to catch it.
+  it('detects tail truncation (trailing event deleted, meta intact)', async () => {
+    const stub = streamStub('verify-truncated-stream');
+    await stub.create('verify-truncated-stream');
+    for (let i = 1; i <= 3; i++) await stub.append({ i }, `tr-${i}`);
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const events = await state.storage.list<{ seq: number }>({
+        prefix: 'event:',
+      });
+      for (const [key, event] of events) {
+        if (event.seq === 3) await state.storage.delete(key);
+      }
+    });
+
+    expect(await stub.verify()).toEqual({ valid: false, brokenAt: 3 });
+  });
+
+  it('throws for an uninitialized stream, consistent with head()', async () => {
+    const stub = streamStub('verify-uninitialized-stream');
+    // No create(): meta is absent. A false { valid: true } here would report a
+    // vanished authoritative log as a healthy chain.
+    // Explicit try/catch: RpcPromise thenables confuse vitest's `.rejects`
+    // and leak unhandled-rejection warnings.
+    const messages: string[] = [];
+    for (const call of [() => stub.verify(), () => stub.head()]) {
+      try {
+        await call();
+      } catch (err) {
+        messages.push((err as Error).message);
+      }
+    }
+    expect(messages).toEqual([
+      'stream not initialized',
+      'stream not initialized',
+    ]);
+  });
 });

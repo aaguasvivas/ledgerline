@@ -202,15 +202,28 @@ export class StreamDO extends DurableObject<Env> {
    */
   async verify(): Promise<{ valid: boolean; brokenAt?: number }> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
-    if (!meta) return { valid: true };
+    // Missing meta means the authoritative state is gone (storage loss, botched
+    // migration). Fail loudly, like head() — never report a vanished log as valid.
+    if (!meta) throw new Error('stream not initialized');
 
     let prev = await genesisHash(meta.streamId);
+    let count = 0;
+    let lastSeq = 0;
     for await (const event of this.iterateEvents()) {
       const expected = await nextHash(prev, event.payload, event.seq);
       if (expected !== event.hash) {
         return { valid: false, brokenAt: event.seq };
       }
       prev = expected;
+      count += 1;
+      lastSeq = event.seq;
+    }
+
+    // The links recomputed cleanly — now confirm this is the WHOLE chain.
+    // Tail truncation leaves a clean prefix; meta commits to the true head, so
+    // compare both the event count and the final hash against it.
+    if (count !== meta.count || prev !== meta.headHash) {
+      return { valid: false, brokenAt: lastSeq + 1 };
     }
     return { valid: true };
   }
