@@ -34,7 +34,7 @@ new_sqlite_classes = ["StreamDO", "RateLimiterDO"]
 [[d1_databases]]
 binding = "DB"
 database_name = "ledgerline"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "f650cfc5-1b00-4199-9257-c8cc51ac484f"
 migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------

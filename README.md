@@ -14,7 +14,9 @@
 
 ![Append, replay the same Idempotency-Key, verify the chain](docs/demo.gif)
 
-Exactly-once in one screen: the retried `Idempotency-Key` returns the original `{seq, hash}` with `Idempotent-Replay: true` and no second event, then one call verifies the whole hash chain. There is also an **interactive walkthrough** at `/demo` on any running instance (locally: `npm run dev`, then open `http://localhost:8787/demo`): tamper with a payload in the browser and watch `verify` pinpoint the break.
+Exactly-once in one screen: the retried `Idempotency-Key` returns the original `{seq, hash}` with `Idempotent-Replay: true` and no second event, then one call verifies the whole hash chain.
+
+**Try it live:** the interactive walkthrough at [ledgerline.adelsonaguasvivas.workers.dev/demo](https://ledgerline.adelsonaguasvivas.workers.dev/demo) recomputes the real hash chain in your browser. Tamper with a payload and watch `verify` pinpoint the break. (It also runs on any local instance: `npm run dev`, then `http://localhost:8787/demo`.)
 
 ---
 
@@ -297,8 +299,9 @@ npm run deploy
 
 # 5. Mint your first key against the live database.
 node scripts/seed.mjs --remote --name first-key --rate 120
-#    …then put your deployed URL here:  https://ledgerline.<subdomain>.workers.dev
 ```
+
+The reference instance of this repo runs at **https://ledgerline.adelsonaguasvivas.workers.dev** (health: [/health](https://ledgerline.adelsonaguasvivas.workers.dev/health), demo: [/demo](https://ledgerline.adelsonaguasvivas.workers.dev/demo)).
 
 **Required bindings** (all pre-declared in `wrangler.toml`): Durable Objects `STREAM` (`StreamDO`) and `RATE_LIMITER` (`RateLimiterDO`), D1 database `DB`, and the `ADMIN_SECRET` secret.
 
