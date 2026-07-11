@@ -33,8 +33,8 @@ export const LANDING_HTML = `<!doctype html>
     <li><b>Tamper-evident audit log.</b> A SHA-256 hash chain you can verify end-to-end in one call.</li>
   </ul>
   <footer>
-    API base: <code>/v1</code> &middot; health: <code>GET /health</code> &middot;
-    verify: <code>GET /v1/streams/:id/verify</code> &middot; docs: <code>README.md</code>
+    <a href="/demo">interactive demo</a> &middot; API base: <code>/v1</code> &middot;
+    health: <code>GET /health</code> &middot; docs: <code>README.md</code>
   </footer>
 </main>
 </body>

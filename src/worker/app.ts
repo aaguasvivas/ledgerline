@@ -17,6 +17,7 @@ import {
 import { log } from '../lib/log';
 import { streamStub } from '../do/stream';
 import { LANDING_HTML } from './landing';
+import { DEMO_HTML } from './demo';
 
 /**
  * The Ledgerline HTTP API.
@@ -30,6 +31,9 @@ const app = new Hono<AppEnv>();
 
 /** Tiny static landing page. */
 app.get('/', (c) => c.html(LANDING_HTML));
+
+/** Interactive walkthrough — static, unauthenticated, no server state. */
+app.get('/demo', (c) => c.html(DEMO_HTML));
 
 /** Liveness probe — unauthenticated, no rate limit. */
 app.get('/health', (c) => c.json({ status: 'ok' }));
