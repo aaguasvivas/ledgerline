@@ -5,8 +5,16 @@
 ![CI](https://github.com/aaguasvivas/ledgerline/actions/workflows/ci.yml/badge.svg)
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)
 ![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-68%20passing-3FB950)
+![Tests](https://img.shields.io/badge/tests-69%20passing-3FB950)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+
+---
+
+## See it work
+
+![Append, replay the same Idempotency-Key, verify the chain](docs/demo.gif)
+
+Exactly-once in one screen: the retried `Idempotency-Key` returns the original `{seq, hash}` with `Idempotent-Replay: true` and no second event, then one call verifies the whole hash chain. There is also an **interactive walkthrough** at `/demo` on any running instance (locally: `npm run dev`, then open `http://localhost:8787/demo`): tamper with a payload in the browser and watch `verify` pinpoint the break.
 
 ---
 
@@ -66,6 +74,7 @@ The Worker is a stateless edge front door. State and the guarantees that matter 
 > **Prerequisites:** Node **≥ 22** (the test runtime, `miniflare`, uses `node:sqlite`). An `.nvmrc` pins it; run `nvm use`.
 
 ```bash
+git clone https://github.com/aaguasvivas/ledgerline.git && cd ledgerline
 npm install
 
 # Local secret for the admin key-minting endpoint (git-ignored).

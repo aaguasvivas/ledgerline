@@ -16,6 +16,10 @@
   },
   "license": "MIT",
   "author": "Adelson Aguasvivas <aaguasvivas907@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aaguasvivas/ledgerline.git"
+  },
   "engines": {
     "node": ">=22"
   },
