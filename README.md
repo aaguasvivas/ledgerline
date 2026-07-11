@@ -2,13 +2,11 @@
 
 **Append-only event streams with exactly-once writes, strong ordering, and a tamper-evident hash chain, running at the edge on Cloudflare Workers.**
 
+![CI](https://github.com/aaguasvivas/ledgerline/actions/workflows/ci.yml/badge.svg)
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)
 ![TypeScript strict](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Tests](https://img.shields.io/badge/tests-68%20passing-3FB950)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-
-> Replace the CI badge once a remote is set:
-> `![CI](https://github.com/<owner>/ledgerline/actions/workflows/ci.yml/badge.svg)`
 
 ---
 
