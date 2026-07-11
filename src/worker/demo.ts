@@ -151,10 +151,10 @@ export const DEMO_HTML = `<!doctype html>
         <div class="node"><div class="n-title">D1 read model</div><div class="n-sub">paginated reads · eventually consistent</div></div>
       </div>
       <ol class="steps">
-        <li><strong>Authenticate.</strong> The bearer key is SHA-256-hashed and looked up in D1. No plaintext keys anywhere.</li>
-        <li><strong>Spend a token.</strong> The key's own RateLimiterDO must grant one token or the request ends 429.</li>
-        <li><strong>Append.</strong> The stream's StreamDO assigns the next seq, links the hash chain, commits atomically.</li>
-        <li><strong>Mirror.</strong> Only after the authority confirms does the Worker copy the event into D1 for reads.</li>
+        <li><span><strong>Authenticate.</strong> The bearer key is SHA-256-hashed and looked up in D1. No plaintext keys anywhere.</span></li>
+        <li><span><strong>Spend a token.</strong> The key's own RateLimiterDO must grant one token or the request ends 429.</span></li>
+        <li><span><strong>Append.</strong> The stream's StreamDO assigns the next seq, links the hash chain, commits atomically.</span></li>
+        <li><span><strong>Mirror.</strong> Only after the authority confirms does the Worker copy the event into D1 for reads.</span></li>
       </ol>
     </div>
   </section>

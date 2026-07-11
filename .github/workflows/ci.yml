@@ -10,9 +10,9 @@ jobs:
     name: typecheck + tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           # miniflare 4 / wrangler 4 require Node >= 22.
           node-version: 22
