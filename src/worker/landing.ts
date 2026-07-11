@@ -26,7 +26,7 @@ export const LANDING_HTML = `<!doctype html>
 <body>
 <main>
   <h1>Ledgerline</h1>
-  <p class="tag">Append-only event streams with exactly-once writes, strong ordering, and a tamper-evident hash chain — at the edge.</p>
+  <p class="tag">Append-only event streams with exactly-once writes, strong ordering, and a tamper-evident hash chain, at the edge.</p>
   <ul>
     <li><b>Exactly-once appends.</b> Client idempotency keys collapse retries to a single event.</li>
     <li><b>Strong per-stream ordering.</b> A single-threaded Durable Object serializes every append.</li>
