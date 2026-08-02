@@ -258,7 +258,7 @@ A map from each component to the interview concept it demonstrates:
 Tests run inside the **real Workers runtime** (`workerd` via Miniflare and `@cloudflare/vitest-pool-workers`) against actual Durable Objects and a local D1, not mocks. Built test-first.
 
 ```bash
-npm test            # 68 tests, 13 files
+npm test            # 69 tests, 14 files
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit (strict)
 ```
@@ -331,7 +331,7 @@ src/
     log.ts              structured JSON logger
 migrations/0001_init.sql  D1 read-model schema
 scripts/seed.mjs          mint a key into local/remote D1
-test/                     68 tests across 13 files
+test/                     69 tests across 14 files
 ```
 
 ---
