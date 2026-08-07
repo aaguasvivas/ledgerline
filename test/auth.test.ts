@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { fetchApi, seedKey, seededClient } from './helpers';
 
-// Spec test 5 — auth.
+// Spec test 5: auth.
 describe('authentication', () => {
   it('rejects a missing bearer token with 401', async () => {
     const res = await fetchApi('/v1/streams', { method: 'POST' });

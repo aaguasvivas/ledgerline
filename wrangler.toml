@@ -1,4 +1,4 @@
-# Ledgerline — Cloudflare Workers configuration
+# Ledgerline: Cloudflare Workers configuration
 #
 # This file is complete and committed on purpose: it documents every binding the
 # service needs. The only value you must change before deploying is the D1
@@ -9,7 +9,7 @@ main = "src/index.ts"
 compatibility_date = "2025-04-01"
 
 # ---------------------------------------------------------------------------
-# Durable Objects — the authoritative, strongly-consistent coordination layer.
+# Durable Objects: the authoritative, strongly-consistent coordination layer.
 #   StreamDO       : one instance per stream (ordering, idempotency, hash chain)
 #   RateLimiterDO  : one instance per API key (token-bucket rate limiting)
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ tag = "v1"
 new_sqlite_classes = ["StreamDO", "RateLimiterDO"]
 
 # ---------------------------------------------------------------------------
-# D1 — the eventually-consistent SQL read model (CQRS query side).
+# D1: the eventually-consistent SQL read model (CQRS query side).
 # Replace `database_id` with the id printed by `wrangler d1 create ledgerline`.
 # ---------------------------------------------------------------------------
 [[d1_databases]]
@@ -39,7 +39,7 @@ migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------
 # Secrets (do NOT commit real values):
-#   ADMIN_SECRET — guards POST /v1/keys. Set with:
+#   ADMIN_SECRET: guards POST /v1/keys. Set with:
 #       wrangler secret put ADMIN_SECRET
 # In local dev, put it in `.dev.vars` (git-ignored). In tests it is injected by
 # vitest.config.ts.

@@ -14,7 +14,7 @@ export interface TakeResult {
 }
 
 /**
- * RateLimiterDO — one instance per API key; a persistent token bucket.
+ * RateLimiterDO: one instance per API key; a persistent token bucket.
  *
  * Capacity is the burst ceiling and `refillPerMin` the sustained rate (both set
  * to the key's `rate_per_min`). Because the object is single-threaded and the

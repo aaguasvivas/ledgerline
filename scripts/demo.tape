@@ -1,4 +1,4 @@
-# vhs tape — records docs/demo.gif (https://github.com/charmbracelet/vhs)
+# vhs tape: records docs/demo.gif (https://github.com/charmbracelet/vhs)
 #
 # Prereqs: `brew install vhs`, a running `npm run dev` on :8787, and
 # /tmp/ledgerline-demo-env.sh exporting BASE, KEY, and SID (see README).

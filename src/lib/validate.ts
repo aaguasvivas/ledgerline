@@ -3,7 +3,7 @@ import { ApiError } from './errors';
 /**
  * Request-input limits. These are explicit product limits, deliberately far
  * below any platform ceiling (DO storage values, D1 rows, RPC frames), so an
- * oversized request always fails as a clean typed 4xx at the edge — never as an
+ * oversized request always fails as a clean typed 4xx at the edge, never as an
  * opaque 500 from a storage layer deep inside a Durable Object.
  */
 export const MAX_PAYLOAD_BYTES = 262_144; // 256 KiB
@@ -26,7 +26,7 @@ export function assertIdempotencyKey(key: string): void {
  * - nesting depth is capped (the recursive canonicalizer must never be the
  *   place a pathological input blows the call stack), and
  * - numbers must be finite (JSON grammar allows 1e999, which JSON.parse turns
- *   into Infinity and JSON.stringify would silently serialize as null — a
+ *   into Infinity and JSON.stringify would silently serialize as null, a
  *   type-changing mutation and a hash collision with a literal null).
  */
 export function assertPayloadShape(value: unknown, depth = 0): void {

@@ -38,7 +38,7 @@ describe('payload limits', () => {
   });
 
   it('rejects non-finite numbers (JSON 1e999 parses to Infinity) with 400', async () => {
-    // Without the check this is silently canonicalized as null — a
+    // Without the check this is silently canonicalized as null, a
     // type-changing mutation and a hash collision with a literal null.
     const res = await appendRaw('{"amount":1e999}');
     expect(res.status).toBe(400);

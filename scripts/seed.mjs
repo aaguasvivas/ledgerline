@@ -59,6 +59,6 @@ execFileSync(
   { stdio: 'inherit' },
 );
 
-console.log('\n  API key (shown once — store it securely):\n');
+console.log('\n  API key (shown once; store it securely):\n');
 console.log(`    ${rawKey}\n`);
 console.log(`  name=${name}  rate_per_min=${ratePerMin}  scope=${remote ? 'remote' : 'local'}\n`);

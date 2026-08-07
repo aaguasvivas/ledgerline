@@ -6,7 +6,7 @@ import { genesisHash, nextHash } from '../src/lib/hash';
 
 // Regression: a retried Idempotency-Key must bind the read-model row to the
 // ORIGINAL event (whose payload hashes to the stored hash), never to the
-// retried request body — even in the self-heal window where the first mirror
+// retried request body, even in the self-heal window where the first mirror
 // write never landed.
 describe('read-model integrity on idempotent replay', () => {
   it('mirrors the original payload (matching the stored hash), not a retried body', async () => {
@@ -43,7 +43,7 @@ describe('read-model integrity on idempotent replay', () => {
 
   // The DO is authoritative and its commit is durable; D1 is an eventually-
   // consistent projection. A failed mirror write therefore must not turn a
-  // successful append into a 500 — the client would never learn its {seq, hash}
+  // successful append into a 500; the client would never learn its {seq, hash}
   // even though the event exists.
   it('append still succeeds when the D1 mirror write fails', async () => {
     const api = await seededClient();

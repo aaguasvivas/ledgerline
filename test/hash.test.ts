@@ -26,7 +26,7 @@ describe('canonicalize', () => {
   });
 
   // Regression: JSON.parse creates "__proto__" as an OWN property, and a naive
-  // rebuild onto {} triggers the prototype setter instead — silently dropping
+  // rebuild onto {} triggers the prototype setter instead, silently dropping
   // the key from the canonical form (hash collision + data loss).
   it('preserves own "__proto__" keys from JSON.parse', () => {
     const withProto = JSON.parse('{"__proto__":{"a":1},"b":2}');

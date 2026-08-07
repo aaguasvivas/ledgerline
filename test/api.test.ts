@@ -44,7 +44,7 @@ describe('POST /v1/streams/:id/events', () => {
     expect(body.error.code).toBe('idempotency_key_required');
   });
 
-  // Spec test 1 — exactly-once.
+  // Spec test 1: exactly-once.
   it('replays the original event for a repeated key and appends nothing new', async () => {
     const id = await api.createStream();
     const first = (await (
@@ -63,7 +63,7 @@ describe('POST /v1/streams/:id/events', () => {
     expect(head.count).toBe(1);
   });
 
-  // Spec test 2 — ordering.
+  // Spec test 2: ordering.
   it('assigns strictly increasing, contiguous seq numbers', async () => {
     const id = await api.createStream();
     const seqs: number[] = [];
@@ -91,7 +91,7 @@ describe('unicode payloads end-to-end', () => {
     ).json()) as { events: { seq: number; hash: string; payload: unknown }[] };
     expect(body.events[0].payload).toEqual(payload);
 
-    // The read model's payload recomputes to the stored hash byte-for-byte —
+    // The read model's payload recomputes to the stored hash byte-for-byte;
     // the independent-auditability contract.
     const { genesisHash, nextHash } = await import('../src/lib/hash');
     const recomputed = await nextHash(await genesisHash(id), body.events[0].payload, 1);
@@ -117,7 +117,7 @@ describe('GET /v1/streams/:id/head', () => {
   });
 });
 
-// Spec test 6 — read model.
+// Spec test 6: read model.
 describe('GET /v1/streams/:id/events (D1 read model)', () => {
   it('returns mirrored events with pagination', async () => {
     const id = await api.createStream();
@@ -153,7 +153,7 @@ describe('GET /v1/streams/:id/events (D1 read model)', () => {
     expect((await page('')).events).toHaveLength(50);
     // Garbage limit falls back to the default.
     expect((await page('?limit=abc')).events).toHaveLength(50);
-    // limit is clamped up to at least 1 — and must not 500 on an empty page.
+    // limit is clamped up to at least 1, and must not 500 on an empty page.
     expect((await page('?limit=0')).events).toHaveLength(1);
     expect((await page('?limit=-3')).events).toHaveLength(1);
     // Exponent notation is a real number, not parseInt-truncated to 1.
@@ -164,7 +164,7 @@ describe('GET /v1/streams/:id/events (D1 read model)', () => {
   });
 });
 
-// Spec test 6 — rollups.
+// Spec test 6: rollups.
 describe('GET /v1/streams/:id/stats', () => {
   it('reports total and per-minute counts after appends', async () => {
     const id = await api.createStream();
@@ -183,7 +183,7 @@ describe('GET /v1/streams/:id/stats', () => {
   });
 });
 
-// Spec test 3 — hash-chain integrity over HTTP.
+// Spec test 3: hash-chain integrity over HTTP.
 describe('GET /v1/streams/:id/verify', () => {
   it('verifies an untampered chain', async () => {
     const id = await api.createStream();

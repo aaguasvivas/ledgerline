@@ -32,14 +32,14 @@ const app = new Hono<AppEnv>();
 /** Tiny static landing page. */
 app.get('/', (c) => c.html(LANDING_HTML));
 
-/** Interactive walkthrough — static, unauthenticated, no server state. */
+/** Interactive walkthrough: static, unauthenticated, no server state. */
 app.get('/demo', (c) => c.html(DEMO_HTML));
 
-/** Liveness probe — unauthenticated, no rate limit. */
+/** Liveness probe: unauthenticated, no rate limit. */
 app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // ---------------------------------------------------------------------------
-// POST /v1/keys — admin-only key minting, guarded by ADMIN_SECRET.
+// POST /v1/keys: admin-only key minting, guarded by ADMIN_SECRET.
 // Not bearer-authed and not rate-limited (it predates any key).
 // ---------------------------------------------------------------------------
 app.post('/v1/keys', async (c) => {
@@ -53,7 +53,7 @@ app.post('/v1/keys', async (c) => {
   try {
     body = await c.req.json();
   } catch {
-    // Empty/invalid body is fine — fall back to defaults.
+    // Empty/invalid body is fine; fall back to defaults.
   }
 
   const name = typeof body.name === 'string' ? body.name : 'unnamed';
@@ -62,7 +62,7 @@ app.post('/v1/keys', async (c) => {
   }
 
   // Missing rate defaults to 60; an explicitly provided rate must be a finite
-  // positive integer — floor BEFORE validating so 0.5 cannot slip through as 0,
+  // positive integer; floor BEFORE validating so 0.5 cannot slip through as 0,
   // and non-finite values (JSON 1e999 parses to Infinity) get a 400, not a 500
   // from the D1 bind.
   let ratePerMin = 60;
@@ -95,7 +95,7 @@ app.post('/v1/keys', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// /v1/streams — every route requires a valid bearer key and is rate-limited.
+// /v1/streams: every route requires a valid bearer key and is rate-limited.
 // ---------------------------------------------------------------------------
 const streams = new Hono<AppEnv>();
 streams.use('*', authenticate);
@@ -120,7 +120,7 @@ streams.post('/', async (c) => {
   await streamStub(c.env, id).create(id);
   // Unlike the event mirror, this insert IS load-bearing (ownership checks
   // read it), so a failure correctly fails the request. The client retries
-  // with a fresh UUID; the first DO's meta record is orphaned — an accepted,
+  // with a fresh UUID; the first DO's meta record is orphaned, an accepted,
   // rare (~100-byte, infra-failure-only) cost of DO-first ordering, which is
   // the safer direction: the reverse order would leave an owned stream whose
   // authoritative state does not exist.
@@ -172,7 +172,7 @@ streams.post('/:id/events', async (c) => {
   //
   // The DO write above is durable and authoritative; D1 is an eventually-
   // consistent projection. A mirror failure therefore must not fail the
-  // request — the client would never learn its {seq, hash} for an event that
+  // request; the client would never learn its {seq, hash} for an event that
   // exists. The gap heals on any retry of the same Idempotency-Key.
   try {
     await c.env.DB.prepare(
@@ -259,7 +259,7 @@ streams.get('/:id/verify', async (c) => {
 app.route('/v1/streams', streams);
 
 // ---------------------------------------------------------------------------
-// Error handling — uniform JSON envelopes.
+// Error handling: uniform JSON envelopes.
 // ---------------------------------------------------------------------------
 app.notFound((c) => c.json(errorBody('not_found', 'Not found'), 404));
 

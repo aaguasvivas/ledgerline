@@ -72,16 +72,16 @@ export function streamStub(
 }
 
 /**
- * StreamDO — one instance per stream; the authoritative source of truth for
+ * StreamDO: one instance per stream; the authoritative source of truth for
  * ordering and integrity.
  *
  * A Durable Object is single-threaded, so there is no shared-memory race to
  * guard against. The one remaining hazard is *interleaving across awaits*: an
- * append reads `meta`, awaits a SHA-256 digest, then writes — and a second
+ * append reads `meta`, awaits a SHA-256 digest, then writes, and a second
  * concurrent append could slip in at the digest await. We close that window by
  * running each mutation inside `blockConcurrencyWhile`, which defers delivery of
  * other events until the critical section completes. The result is strict
- * serialization — monotonic `seq` and exactly-once appends — with no locks,
+ * serialization (monotonic `seq` and exactly-once appends) with no locks,
  * leases, or coordination beyond the platform.
  */
 export class StreamDO extends DurableObject<Env> {
@@ -109,7 +109,7 @@ export class StreamDO extends DurableObject<Env> {
    * Append a payload under an idempotency key.
    *
    * If the key was used before, the original event is returned unchanged with
-   * `replay: true` and nothing is written — exactly-once under client retries.
+   * `replay: true` and nothing is written: exactly-once under client retries.
    * Otherwise a new event is linked into the hash chain and `meta`, the event,
    * and the idempotency record are committed in a single atomic batch.
    */
@@ -211,7 +211,7 @@ export class StreamDO extends DurableObject<Env> {
   async verify(): Promise<{ valid: boolean; brokenAt?: number }> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     // Missing meta means the authoritative state is gone (storage loss, botched
-    // migration). Fail loudly, like head() — never report a vanished log as valid.
+    // migration). Fail loudly, like head(); never report a vanished log as valid.
     if (!meta) throw new Error('stream not initialized');
 
     let prev = await genesisHash(meta.streamId);
@@ -227,7 +227,7 @@ export class StreamDO extends DurableObject<Env> {
       lastSeq = event.seq;
     }
 
-    // The links recomputed cleanly — now confirm this is the WHOLE chain.
+    // The links recomputed cleanly; now confirm this is the WHOLE chain.
     // Tail truncation leaves a clean prefix; meta commits to the true head, so
     // compare both the event count and the final hash against it.
     if (count !== meta.count || prev !== meta.headHash) {

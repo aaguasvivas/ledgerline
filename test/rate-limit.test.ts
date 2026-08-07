@@ -9,7 +9,7 @@ interface StoredBucket {
   updatedAt: number;
 }
 
-// Spec test 4 — rate limiting.
+// Spec test 4: rate limiting.
 describe('rate limiting', () => {
   it('returns 429 once a key exhausts its bucket within the window', async () => {
     const raw = await seedKey({ ratePerMin: 3 });

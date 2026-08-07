@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { verifyAdminSecret } from '../src/lib/auth';
 
 // Regression: the admin guard must fail CLOSED. If the secret is unconfigured,
-// no request may pass — including one that simply omits the header (which would
+// no request may pass, including one that simply omits the header (which would
 // otherwise be `undefined === undefined`).
 describe('verifyAdminSecret', () => {
   it('rejects when the expected secret is unconfigured', () => {

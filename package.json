@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Edge-native, append-only event streams with exactly-once appends, strong per-stream ordering, and a tamper-evident SHA-256 hash-chained audit log — on Cloudflare Workers.",
+  "description": "Edge-native, append-only event streams with exactly-once appends, strong per-stream ordering, and a tamper-evident SHA-256 hash-chained audit log, on Cloudflare Workers.",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

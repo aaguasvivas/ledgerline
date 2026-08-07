@@ -6,7 +6,7 @@ import {
 
 /**
  * Vitest runs inside the real Workers runtime (workerd) via Miniflare, so tests
- * exercise actual Durable Objects and a local D1 database — not mocks.
+ * exercise actual Durable Objects and a local D1 database, not mocks.
  *
  * D1 migrations are read at config time and handed to the test worker as a
  * binding; `test/apply-migrations.ts` applies them before each test file.

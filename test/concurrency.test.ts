@@ -10,7 +10,7 @@ function streamStub(streamId: string): DurableObjectStub<StreamDO> {
   return ns.get(ns.idFromName(streamId));
 }
 
-// The project's headline guarantee — strict serialization — rests on
+// The project's headline guarantee (strict serialization) rests on
 // blockConcurrencyWhile closing the interleave window at the crypto.subtle
 // await. These tests put appends genuinely in flight together, so removing or
 // narrowing that guard cannot pass silently.

@@ -1,8 +1,8 @@
 /** Bindings available to the Worker and Durable Objects (see wrangler.toml). */
 export interface Env {
-  /** StreamDO namespace — one instance per stream. */
+  /** StreamDO namespace: one instance per stream. */
   STREAM: DurableObjectNamespace;
-  /** RateLimiterDO namespace — one instance per API key. */
+  /** RateLimiterDO namespace: one instance per API key. */
   RATE_LIMITER: DurableObjectNamespace;
   /** D1 read model. */
   DB: D1Database;

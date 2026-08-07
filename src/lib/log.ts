@@ -1,6 +1,6 @@
 /**
  * Minimal structured logger: one JSON object per line, consumable by
- * `wrangler tail` and Workers observability. Kept tiny on purpose — no
+ * `wrangler tail` and Workers observability. Kept tiny on purpose: no
  * dependencies, no buffering.
  */
 type Fields = Record<string, unknown>;
