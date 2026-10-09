@@ -73,6 +73,31 @@ describe('POST /v1/keys (admin)', () => {
     expect(body.rate_per_min).toBe(60);
   });
 
+  it('mints with defaults when the body is empty', async () => {
+    const res = await fetchApi('/v1/keys', {
+      method: 'POST',
+      headers: { 'X-Admin-Secret': ADMIN_SECRET },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { name: string; rate_per_min: number };
+    expect(body).toMatchObject({ name: 'unnamed', rate_per_min: 60 });
+  });
+
+  // Regression: a JSON `null` body crashed the handler (500), and malformed
+  // JSON silently minted a default key the admin never asked for.
+  it('rejects a body that is not a JSON object with 400', async () => {
+    for (const body of ['null', '[]', '"acme"', '{"name":"acme",']) {
+      const res = await fetchApi('/v1/keys', {
+        method: 'POST',
+        headers: { 'X-Admin-Secret': ADMIN_SECRET, 'Content-Type': 'application/json' },
+        body,
+      });
+      expect(res.status, body).toBe(400);
+      const json = (await res.json()) as { error: { code: string } };
+      expect(json.error.code).toBe('invalid_body');
+    }
+  });
+
   it('rejects a wrong admin secret with 403', async () => {
     const res = await fetchApi('/v1/keys', {
       method: 'POST',

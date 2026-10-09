@@ -13,6 +13,7 @@ import {
   MAX_PAYLOAD_BYTES,
   assertIdempotencyKey,
   assertPayloadShape,
+  readBodyText,
 } from '../lib/validate';
 import { log } from '../lib/log';
 import { streamStub } from '../do/stream';
@@ -49,11 +50,22 @@ app.post('/v1/keys', async (c) => {
     throw new ApiError(403, 'forbidden', 'Invalid or missing admin secret');
   }
 
+  // An empty body means "all defaults"; anything else must be a JSON object.
+  // Silently defaulting a malformed body would mint a key the admin did not
+  // ask for (wrong rate, no name).
   let body: { name?: unknown; rate_per_min?: unknown } = {};
-  try {
-    body = await c.req.json();
-  } catch {
-    // Empty/invalid body is fine; fall back to defaults.
+  const raw = await readBodyText(c.req.raw, 4096);
+  if (raw.trim() !== '') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new ApiError(400, 'invalid_body', 'Request body must be a JSON object');
+    }
+    body = parsed as typeof body;
   }
 
   const name = typeof body.name === 'string' ? body.name : 'unnamed';
@@ -147,14 +159,7 @@ streams.post('/:id/events', async (c) => {
   const id = c.req.param('id');
   await requireOwnedStream(c, id);
 
-  const raw = await c.req.text();
-  if (new TextEncoder().encode(raw).length > MAX_PAYLOAD_BYTES) {
-    throw new ApiError(
-      413,
-      'payload_too_large',
-      `Payload exceeds ${MAX_PAYLOAD_BYTES} bytes`,
-    );
-  }
+  const raw = await readBodyText(c.req.raw, MAX_PAYLOAD_BYTES);
 
   let payload: unknown;
   try {

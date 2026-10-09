@@ -53,6 +53,54 @@ describe('payload limits', () => {
     expect(body.error.code).toBe('idempotency_key_invalid');
   });
 
+  // Regression: the body used to be buffered in full before its size was
+  // checked. A chunked upload declares no Content-Length, so the cap must be
+  // enforced while streaming.
+  it('rejects an oversized chunked body (no Content-Length) while streaming', async () => {
+    const body = new TextEncoder().encode(JSON.stringify({ data: 'x'.repeat(300_000) }));
+    let offset = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= body.length) return controller.close();
+        controller.enqueue(body.slice(offset, (offset += 16_384)));
+      },
+    });
+
+    const res = await api.fetch(`/v1/streams/${streamId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'chunked' },
+      body: stream,
+    });
+    expect(res.status).toBe(413);
+    const json = (await res.json()) as { error: { code: string } };
+    expect(json.error.code).toBe('payload_too_large');
+  });
+
+  it('rejects a body that is not valid UTF-8 instead of silently replacing bytes', async () => {
+    const bytes = new Uint8Array([0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]); // {"a":"<0xFF>"}
+    const res = await api.fetch(`/v1/streams/${streamId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'bad-utf8' },
+      body: bytes,
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: { code: string } };
+    expect(json.error.code).toBe('invalid_payload');
+  });
+
+  // An escaped lone surrogate is legal JSON text but not valid Unicode, and
+  // has no RFC 8785 canonical form, so external verifiers could disagree.
+  it('rejects unpaired UTF-16 surrogates in values and keys', async () => {
+    for (const raw of ['{"a":"\ud800"}', '{"\udc00":1}', '["ok", "x\ud83d"]']) {
+      const res = await appendRaw(raw);
+      expect(res.status, raw).toBe(400);
+      const json = (await res.json()) as { error: { code: string } };
+      expect(json.error.code).toBe('invalid_payload');
+    }
+    // A well-formed surrogate PAIR (an astral character) is fine.
+    expect((await appendRaw('{"a":"\ud83d\ude80"}')).status).toBe(201);
+  });
+
   it('still accepts reasonable payloads (10-deep nesting, 100 KiB body)', async () => {
     const nested = { a: { b: { c: { d: { e: { f: { g: { h: { i: { j: 1 } } } } } } } } } };
     const ok1 = await appendRaw(JSON.stringify(nested));
