@@ -46,3 +46,10 @@ migrations_dir = "migrations"
 # ---------------------------------------------------------------------------
 [observability]
 enabled = true
+
+# Bundle PNGs as binary modules (imported as ArrayBuffer), so the Worker can
+# serve the landing page's social preview card at /og.png.
+[[rules]]
+type = "Data"
+globs = ["**/*.png"]
+fallthrough = true

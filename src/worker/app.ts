@@ -18,8 +18,8 @@ import {
 import { log } from '../lib/log';
 import { mirrorStatement } from '../lib/read-model';
 import { streamStub } from '../do/stream';
-import { LANDING_HTML } from './landing';
-import { DEMO_HTML } from './demo';
+import { renderLanding } from './landing';
+import OG_IMAGE from './og.png';
 
 /**
  * The Ledgerline HTTP API.
@@ -31,11 +31,19 @@ import { DEMO_HTML } from './demo';
  */
 const app = new Hono<AppEnv>();
 
-/** Tiny static landing page. */
-app.get('/', (c) => c.html(LANDING_HTML));
+/** Landing page with the interactive chain demo: static, no server state. */
+app.get('/', (c) => c.html(renderLanding(new URL(c.req.url).origin)));
 
-/** Interactive walkthrough: static, unauthenticated, no server state. */
-app.get('/demo', (c) => c.html(DEMO_HTML));
+/** The walkthrough used to live here; keep existing links working. */
+app.get('/demo', (c) => c.redirect('/#tamper', 301));
+
+/** Social preview card referenced by the landing page's Open Graph tags. */
+app.get('/og.png', (c) =>
+  c.body(OG_IMAGE, 200, {
+    'Content-Type': 'image/png',
+    'Cache-Control': 'public, max-age=86400',
+  }),
+);
 
 /** Liveness probe: unauthenticated, no rate limit. */
 app.get('/health', (c) => c.json({ status: 'ok' }));
