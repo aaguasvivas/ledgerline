@@ -80,24 +80,40 @@ export interface VerifyResult {
 
 const META_KEY = 'meta';
 
-/** Highest seq the outbox sweep has confirmed in D1. Only alarm() writes it. */
+/**
+ * Every seq at or below this watermark is known to be in D1 (or, if the event
+ * itself is gone from storage, can never be). Only alarm() writes it.
+ */
 const MIRRORED_KEY = 'mirror:through';
 
 /**
  * Delay between an append and the outbox sweep that guarantees it reaches D1.
- * The Worker's inline mirror normally lands first, so the sweep is usually a
- * no-op confirmation; it exists for the times the inline write does not.
+ * The Worker's inline mirror normally lands first, so the sweep usually just
+ * confirms; it exists for the times the inline write does not.
  */
 const MIRROR_SWEEP_DELAY_MS = 5_000;
 
 /** Back-off after a failed sweep. The alarm reschedules itself indefinitely. */
 const MIRROR_RETRY_DELAY_MS = 30_000;
 
-/** Events per D1 batch (one transaction). */
-const MIRROR_BATCH_SIZE = 100;
+/** Pause between sweeps while working through a backlog. */
+const MIRROR_CONTINUE_DELAY_MS = 250;
 
-/** Batches per sweep; a larger backlog continues in a fresh alarm invocation. */
-const MIRROR_MAX_BATCHES = 10;
+/**
+ * D1 statements one sweep may issue, counting each statement in a batch. Kept
+ * under the Workers Free per-invocation query limit (50), so a sweep can never
+ * fail on quota alone; a larger backlog continues in a fresh invocation.
+ */
+const MIRROR_QUERY_BUDGET = 40;
+
+/** Seqs checked against D1 by one SELECT. */
+const MIRROR_WINDOW = 500;
+
+/** Rows per INSERT batch; also bounded by MIRROR_BATCH_CHARS. */
+const MIRROR_BATCH_SIZE = 25;
+
+/** Approximate payload size per INSERT batch (UTF-16 code units). */
+const MIRROR_BATCH_CHARS = 1_000_000;
 
 /** Zero-padded so DO storage `list()` returns events in seq order. */
 function eventKey(seq: number): string {
@@ -137,8 +153,8 @@ export function streamStub(
  * leases, or coordination beyond the platform.
  *
  * The object also owns delivery to the D1 read model: every append arms an
- * alarm, and alarm() sweeps committed events into D1 until it confirms the
- * head (a transactional outbox), so the projection converges even when the
+ * alarm, and alarm() reconciles D1 against the log until it confirms the head
+ * (a transactional outbox), so the projection converges even when the
  * Worker's inline mirror write fails.
  */
 export class StreamDO extends DurableObject<Env> {
@@ -329,67 +345,103 @@ export class StreamDO extends DurableObject<Env> {
   }
 
   /**
-   * Outbox sweep: project committed events into the D1 read model, from the
-   * last confirmed seq toward the head, then advance the confirmed watermark.
+   * Outbox sweep: reconcile the D1 read model with the log, from the
+   * confirmed watermark toward the head.
    *
-   * Rows are written with INSERT OR IGNORE, so re-sending events the Worker
-   * already mirrored inline is harmless. A failed batch is logged and retried
-   * on our own schedule rather than by throwing: the platform's alarm retries
-   * stop after a handful of attempts, and the read model must converge no
-   * matter how long D1 is unreachable.
+   * For each window of seqs, one SELECT asks D1 which rows it already holds,
+   * and only the missing ones are inserted (INSERT OR IGNORE, so racing the
+   * Worker's inline write is harmless). Catching up after an outage therefore
+   * costs one query per 500 seqs plus one statement per event that was really
+   * lost, and progress is computed from seq arithmetic, never from stored
+   * fields, so a damaged event cannot stall it. Each sweep stays inside a fixed
+   * query budget and continues in a fresh invocation when work remains. A
+   * failed sweep is logged and rescheduled on our own clock rather than
+   * thrown: platform alarm retries stop after a few attempts, and the read
+   * model must converge however long D1 is down.
    */
   override async alarm(): Promise<void> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     if (!meta) return;
+    const db = this.env.DB;
     let through = (await this.ctx.storage.get<number>(MIRRORED_KEY)) ?? 0;
+    let queries = 0;
 
-    for (let round = 0; round < MIRROR_MAX_BATCHES; round++) {
-      // Re-read the head every round: the D1 round-trip below yields, so
-      // appends may have committed since the last batch.
-      const head = (await this.ctx.storage.get<Meta>(META_KEY))!.seq;
-      if (through >= head) return;
+    try {
+      for (;;) {
+        // Re-read the head every window: the D1 round-trips yield, so appends
+        // may have committed in the meantime.
+        const head = (await this.ctx.storage.get<Meta>(META_KEY))!.seq;
+        if (through >= head) return;
+        if (queries >= MIRROR_QUERY_BUDGET) break;
 
-      const batch = await this.ctx.storage.list<StoredEvent>({
-        prefix: 'event:',
-        startAfter: eventKey(through),
-        end: eventKey(head + 1),
-        limit: MIRROR_BATCH_SIZE,
+        const windowEnd = Math.min(head, through + MIRROR_WINDOW);
+        const { results } = await db
+          .prepare('SELECT seq FROM events WHERE stream_id = ? AND seq > ? AND seq <= ?')
+          .bind(meta.streamId, through, windowEnd)
+          .all<{ seq: number }>();
+        queries += 1;
+        const present = new Set(results.map((row) => row.seq));
+        const missing: number[] = [];
+        for (let seq = through + 1; seq <= windowEnd; seq++) {
+          if (!present.has(seq)) missing.push(seq);
+        }
+
+        let done = 0;
+        while (done < missing.length && queries < MIRROR_QUERY_BUDGET) {
+          const wanted = missing.slice(
+            done,
+            done + Math.min(MIRROR_BATCH_SIZE, MIRROR_QUERY_BUDGET - queries),
+          );
+          const stored = await this.ctx.storage.get<StoredEvent>(wanted.map(eventKey));
+          const statements: D1PreparedStatement[] = [];
+          let chars = 0;
+          for (const seq of wanted) {
+            const event = stored.get(eventKey(seq));
+            if (!event) {
+              // The authority lost this event; D1 can never have it. verify()
+              // reports the gap, and the projection moves on past it.
+              log.error('mirror_event_missing', { streamId: meta.streamId, seq });
+              done += 1;
+              continue;
+            }
+            const canonicalPayload = canonicalize(event.payload);
+            if (statements.length > 0 && chars + canonicalPayload.length > MIRROR_BATCH_CHARS) {
+              break;
+            }
+            chars += canonicalPayload.length;
+            statements.push(
+              mirrorStatement(db, meta.streamId, {
+                seq: event.seq,
+                hash: event.hash,
+                prevHash: event.prevHash,
+                canonicalPayload,
+                createdAt: event.createdAt,
+              }),
+            );
+            done += 1;
+          }
+          if (statements.length > 0) {
+            await db.batch(statements);
+            queries += statements.length;
+          }
+        }
+
+        // Every seq below the first one still missing is now in D1.
+        through = done < missing.length ? missing[done] - 1 : windowEnd;
+        await this.ctx.storage.put(MIRRORED_KEY, through);
+      }
+    } catch (err) {
+      log.error('mirror_sweep_failed', {
+        streamId: meta.streamId,
+        fromSeq: through + 1,
+        message: err instanceof Error ? err.message : String(err),
       });
-      const events = [...batch.values()];
-      if (events.length === 0) {
-        // meta claims events the store does not have; verify() reports this.
-        log.error('mirror_events_missing', { streamId: meta.streamId, through });
-        return;
-      }
-
-      try {
-        await this.env.DB.batch(
-          events.map((event) =>
-            mirrorStatement(this.env.DB, meta.streamId, {
-              seq: event.seq,
-              hash: event.hash,
-              prevHash: event.prevHash,
-              canonicalPayload: canonicalize(event.payload),
-              createdAt: event.createdAt,
-            }),
-          ),
-        );
-      } catch (err) {
-        log.error('mirror_sweep_failed', {
-          streamId: meta.streamId,
-          fromSeq: through + 1,
-          message: err instanceof Error ? err.message : String(err),
-        });
-        await this.ctx.storage.setAlarm(Date.now() + MIRROR_RETRY_DELAY_MS);
-        return;
-      }
-
-      through = events[events.length - 1].seq;
-      await this.ctx.storage.put(MIRRORED_KEY, through);
+      await this.ctx.storage.setAlarm(Date.now() + MIRROR_RETRY_DELAY_MS);
+      return;
     }
 
-    // Still behind after a bounded amount of work: continue in a new run.
-    await this.ctx.storage.setAlarm(Date.now());
+    // Query budget spent with work left: continue in a fresh invocation.
+    await this.ctx.storage.setAlarm(Date.now() + MIRROR_CONTINUE_DELAY_MS);
   }
 
   /** Delete rollup buckets for minutes before `oldestKept`. */

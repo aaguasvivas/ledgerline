@@ -1,7 +1,7 @@
-import { env, runDurableObjectAlarm } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, afterEach } from 'vitest';
 import { seededClient } from './helpers';
-import type { StreamDO } from '../src/do/stream';
+import type { StoredEvent, StreamDO } from '../src/do/stream';
 import { genesisHash, nextHash } from '../src/lib/hash';
 
 type Api = Awaited<ReturnType<typeof seededClient>>;
@@ -26,6 +26,19 @@ async function breakReadModel(): Promise<void> {
 
 async function restoreReadModel(): Promise<void> {
   await env.DB.exec('DROP TRIGGER IF EXISTS outage;');
+  await env.DB.exec('DROP TRIGGER IF EXISTS count_attempts;');
+  await env.DB.exec('DROP TABLE IF EXISTS insert_attempts;');
+}
+
+/** Record the seq of every INSERT attempted on the read model, ignored or not. */
+async function countInsertAttempts(): Promise<() => Promise<number[]>> {
+  await env.DB.exec('CREATE TABLE insert_attempts (seq INTEGER NOT NULL);');
+  await env.DB.exec(
+    'CREATE TRIGGER count_attempts BEFORE INSERT ON events BEGIN INSERT INTO insert_attempts VALUES (NEW.seq); END;',
+  );
+  return async () =>
+    (await env.DB.prepare('SELECT seq FROM insert_attempts ORDER BY seq').all<{ seq: number }>())
+      .results.map((r) => r.seq);
 }
 
 // D1 state is shared by the tests in this file; never leak an outage.
@@ -110,7 +123,7 @@ describe('read model delivery', () => {
     expect((await readEvents(api, id)).map((e) => e.seq)).toEqual([1]);
   });
 
-  it('sweeps a backlog larger than one D1 batch, in order, with no gaps', async () => {
+  it('works through a backlog larger than one sweep, in order, with no gaps', async () => {
     const api = await seededClient();
     const id = await api.createStream();
     const stub = streamStub(id);
@@ -118,10 +131,50 @@ describe('read model delivery', () => {
     // outbox is the only path into D1 for all 150 events.
     for (let i = 1; i <= 150; i++) await stub.append({ i }, `k-${i}`);
 
-    expect(await drainOutbox(stub)).toBe(1); // one sweep: batches of 100 + 50
+    // Each sweep stays inside its D1 query budget, so this takes several.
+    expect(await drainOutbox(stub)).toBeGreaterThan(1);
     expect((await readEvents(api, id)).map((e) => e.seq)).toEqual(
       Array.from({ length: 150 }, (_, i) => i + 1),
     );
+  });
+
+  // Catching up must not re-send what the inline path already delivered:
+  // after a long outage that is the difference between a handful of inserts
+  // and one per event since the watermark.
+  it('inserts only the rows D1 is missing', async () => {
+    const api = await seededClient();
+    const id = await api.createStream();
+    for (let i = 1; i <= 10; i++) await api.append(id, { i }, `k-${i}`);
+    // Two inline writes "never landed".
+    await env.DB.prepare('DELETE FROM events WHERE stream_id = ? AND seq IN (3, 7)').bind(id).run();
+    const attempts = await countInsertAttempts();
+
+    await drainOutbox(streamStub(id));
+
+    expect(await attempts()).toEqual([3, 7]);
+    expect((await readEvents(api, id)).map((e) => e.seq)).toEqual(
+      Array.from({ length: 10 }, (_, i) => i + 1),
+    );
+  });
+
+  // Regression: the watermark used to advance by each stored event's own seq
+  // field, so one damaged event made every sweep redo the same work forever.
+  it('cannot be stalled by a damaged or missing event', async () => {
+    const api = await seededClient();
+    const id = await api.createStream();
+    const stub = streamStub(id);
+    for (let i = 1; i <= 4; i++) await stub.append({ i }, `k-${i}`);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const events = await state.storage.list<StoredEvent>({ prefix: 'event:' });
+      for (const [key, event] of events) {
+        if (event.seq === 2) await state.storage.delete(key);
+        if (event.seq === 3) await state.storage.put(key, { ...event, seq: 1 });
+      }
+    });
+
+    await drainOutbox(stub); // throws if it does not converge
+    expect((await readEvents(api, id)).map((e) => e.seq)).toEqual([1, 4]);
+    expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
   });
 
   it('a faithful retry re-mirrors the ORIGINAL event, matching the stored hash', async () => {
