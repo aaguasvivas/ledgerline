@@ -5,7 +5,7 @@
  * JSON. The rules are fixed and versioned so the chain can always be recomputed
  * and audited independently:
  *
- *   canonical JSON = object keys sorted recursively, no whitespace
+ *   canonical JSON   = RFC 8785 (JSON Canonicalization Scheme)
  *   hash_0 (genesis) = SHA-256("ledgerline:v1:" + streamId)
  *   hash_n           = SHA-256(hash_{n-1} + "|" + canonicalJSON(payload_n) + "|" + seq_n)
  *
@@ -16,33 +16,32 @@
 const GENESIS_PREFIX = 'ledgerline:v1:';
 
 /**
- * Serialize a JSON value to its canonical string form: object keys sorted
- * recursively, arrays left in order, no insignificant whitespace. Two values
- * that are deeply equal as JSON always produce the same string, so the hash is
- * independent of key insertion order.
+ * Serialize JSON data (as produced by JSON.parse) to its RFC 8785 canonical
+ * form: object members sorted by key in UTF-16 code-unit order, arrays left in
+ * order, no insignificant whitespace, and strings and numbers formatted as
+ * ECMAScript's JSON.stringify formats them (which is what RFC 8785 specifies).
+ * Two values that are deeply equal as JSON always produce the same string, so
+ * the hash is independent of how a client happened to order its keys.
+ *
+ * Members are emitted explicitly rather than by stringifying a re-sorted
+ * object. Engines enumerate integer-like keys ("1", "10") before all others,
+ * in numeric order, whatever order they were inserted in, so a sorted rebuild
+ * still serializes {"9","10"} as 9-then-10 where RFC 8785 requires "10" first.
+ * Reading `source[key]` per own key also keeps an own "__proto__" property
+ * (which JSON.parse can create) as ordinary data.
  */
 export function canonicalize(value: unknown): string {
-  return JSON.stringify(sortDeep(value));
-}
-
-/** Recursively rebuild a value with object keys in sorted order. */
-function sortDeep(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map(sortDeep);
+    return `[${value.map(canonicalize).join(',')}]`;
   }
   if (value !== null && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    // Null-prototype accumulator: JSON.parse can produce an OWN "__proto__"
-    // property, and assigning that key to a plain {} would invoke the inherited
-    // prototype setter, silently dropping the key from the canonical form. With
-    // no prototype there is no setter, so every key becomes an own data property.
-    const sorted = Object.create(null) as Record<string, unknown>;
-    for (const key of Object.keys(source).sort()) {
-      sorted[key] = sortDeep(source[key]);
-    }
-    return sorted;
+    const members = Object.keys(source)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalize(source[key])}`);
+    return `{${members.join(',')}}`;
   }
-  return value;
+  return JSON.stringify(value);
 }
 
 /** SHA-256 of a UTF-8 string, returned as lowercase hex. */

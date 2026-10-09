@@ -47,6 +47,54 @@ describe('canonicalize', () => {
   });
 });
 
+// RFC 8785 (JSON Canonicalization Scheme) is the published contract for
+// external verifiers, so its own worked examples are the conformance suite.
+describe('RFC 8785 conformance', () => {
+  it('sorts keys by UTF-16 code units, integer-like keys included (RFC 8785 sec. 3.2.3)', () => {
+    const input = JSON.parse(`{
+      "\\u20ac": "Euro Sign",
+      "\\r": "Carriage Return",
+      "\\ufb33": "Hebrew Letter Dalet With Dagesh",
+      "1": "One",
+      "\\ud83d\\ude00": "Emoji: Grinning Face",
+      "\\u0080": "Control",
+      "\\u00f6": "Latin Small Letter O With Diaeresis"
+    }`);
+    // Read member values off the serialized string: re-parsing it into an
+    // object would let the engine reorder the integer-like key again.
+    const values = [...canonicalize(input).matchAll(/:"([^"]*)"/g)].map((m) => m[1]);
+    expect(values).toEqual([
+      'Carriage Return',
+      'One',
+      'Control',
+      'Latin Small Letter O With Diaeresis',
+      'Euro Sign',
+      'Emoji: Grinning Face',
+      'Hebrew Letter Dalet With Dagesh',
+    ]);
+  });
+
+  // Regression: canonicalize used to stringify a re-sorted object, and engines
+  // enumerate integer-like keys first in numeric order, so "9" preceded "10"
+  // and "1" preceded "\r", diverging from the documented spec.
+  it('orders integer-like keys as strings, not numbers', () => {
+    expect(canonicalize({ b: 0, 10: 1, 9: 2, '-1': 3 })).toBe(
+      '{"-1":3,"10":1,"9":2,"b":0}',
+    );
+  });
+
+  it('formats numbers and escapes strings as specified (RFC 8785 sec. 3.2.4)', () => {
+    const input = JSON.parse(String.raw`{
+      "numbers": [333333333.33333329, 1E30, 4.50, 2e-3, 0.000000000000000000000000001],
+      "string": "\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"\/",
+      "literals": [null, true, false]
+    }`);
+    expect(canonicalize(input)).toBe(
+      String.raw`{"literals":[null,true,false],"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],"string":"€$\u000f\nA'B\"\\\\\"/"}`,
+    );
+  });
+});
+
 describe('canonical unicode contract', () => {
   // External verifiers must reproduce these bytes exactly. JS JSON.stringify
   // emits non-ASCII unescaped (unlike e.g. Python's ensure_ascii default);
