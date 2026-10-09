@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
+  CHAIN_VERSION,
   canonicalize,
+  canonicalizeV1,
   sha256Hex,
   genesisHash,
   nextHash,
@@ -107,8 +109,12 @@ describe('canonical unicode contract', () => {
   });
 
   it('hashes a unicode payload to a pinned vector [known answer]', async () => {
-    const g = await genesisHash('unicode-stream');
-    expect(await nextHash(g, { m: 'héllo 🚀', cjk: '分散台帳' }, 1)).toBe(
+    const payload = { m: 'héllo 🚀', cjk: '分散台帳' };
+    expect(await nextHash(await genesisHash('unicode-stream'), payload, 1)).toBe(
+      '503fa412218c37785e6d7cbf9f9ec4adbee021c5e9d0090c42cc11f65b5bffff',
+    );
+    // v1 agrees on the canonical bytes here; only the genesis prefix differs.
+    expect(await nextHash(await genesisHash('unicode-stream', 1), payload, 1, 1)).toBe(
       'adcc8b06f64d591edb552cefce45aa6bb423eb97090a9de6b451d17d57352d5f',
     );
   });
@@ -120,9 +126,18 @@ describe('sha256Hex', () => {
   });
 });
 
+// Vectors below were cross-checked against an independent implementation
+// (Python hashlib over hand-built canonical strings), not just this code.
 describe('genesisHash', () => {
-  it('equals SHA-256("ledgerline:v1:" + streamId) [known answer]', async () => {
+  it('equals SHA-256("ledgerline:v2:" + streamId) for new streams [known answer]', async () => {
+    expect(CHAIN_VERSION).toBe(2);
     expect(await genesisHash('stream-abc')).toBe(
+      '4414438ee390a676df23610ea7505642c8693b9491aade696368b1d55316764a',
+    );
+  });
+
+  it('keeps the v1 genesis, SHA-256("ledgerline:v1:" + streamId) [known answer]', async () => {
+    expect(await genesisHash('stream-abc', 1)).toBe(
       '28f6850ebf448fdfda80dab7f4c03eaee21061732bcfae3abf1be42049820a39',
     );
   });
@@ -133,11 +148,37 @@ describe('nextHash', () => {
     const genesis = await genesisHash('stream-abc');
     const h1 = await nextHash(genesis, { amount: 100, currency: 'USD' }, 1);
     expect(h1).toBe(
-      '7e563267db3692dbf52e2ac9952eac0ef6c0014744993dd07adecdb2451ac91e',
+      '7442f4f6f4dc77b0bb5d49deb108eb9b02382b0f362c46fb196a25f4f2e9c206',
     );
     const h2 = await nextHash(h1, { note: 'second' }, 2);
     expect(h2).toBe(
+      '181e4d15ee6c1f8080c26fd62020aafada306063553fc9b984ca26ad76fe8006',
+    );
+  });
+
+  it('still computes v1 links exactly as v1 streams were written [known answer]', async () => {
+    const genesis = await genesisHash('stream-abc', 1);
+    const h1 = await nextHash(genesis, { amount: 100, currency: 'USD' }, 1, 1);
+    expect(h1).toBe(
+      '7e563267db3692dbf52e2ac9952eac0ef6c0014744993dd07adecdb2451ac91e',
+    );
+    const h2 = await nextHash(h1, { note: 'second' }, 2, 1);
+    expect(h2).toBe(
       '174d9bbc5b460f17e0ffd490a245adadbe6754c8c4255672527ce250f22575ea',
+    );
+  });
+
+  // The one place the versions disagree: v1 serialized integer-like keys in
+  // numeric order (engine property order), v2 in RFC 8785 code-unit order.
+  it('differs between versions exactly on integer-like key order [known answer]', async () => {
+    const payload = { 9: 'a', 10: 'b' };
+    expect(canonicalizeV1(payload)).toBe('{"9":"a","10":"b"}');
+    expect(canonicalize(payload)).toBe('{"10":"b","9":"a"}');
+    expect(await nextHash(await genesisHash('int-keys', 1), payload, 1, 1)).toBe(
+      '09d8b7f394519534388b22e10ffa288856b2cb98e987ab411629400de3b8837e',
+    );
+    expect(await nextHash(await genesisHash('int-keys', 2), payload, 1, 2)).toBe(
+      '884d422ddaeae26bec9c75faeea53049b60c2d8e4c5017ca41349862a688977a',
     );
   });
 

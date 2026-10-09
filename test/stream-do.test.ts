@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { StoredEvent, StreamDO } from '../src/do/stream';
+import { genesisHash, nextHash } from '../src/lib/hash';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -140,6 +141,39 @@ describe('StreamDO rollup buckets', () => {
 
     expect(stats.perMinute.some((b) => b.count === 3)).toBe(true);
     expect(stats.perMinute.some((b) => b.count === 9)).toBe(false);
+  });
+});
+
+// Chain rules are versioned per stream, so a rule change never re-judges
+// existing history. v1 differs from v2 only in how it ordered integer-like
+// keys, which is exactly what these payloads exercise.
+describe('StreamDO chain versions', () => {
+  it('creates new streams under the current chain version', async () => {
+    const stub = await streamWith('version-new-stream', 0);
+    const head = await stub.head();
+    expect(head.chainVersion).toBe(2);
+    expect(head.headHash).toBe(await genesisHash('version-new-stream', 2));
+  });
+
+  it('keeps appending and verifying a v1 stream under v1 rules', async () => {
+    const id = 'version-v1-stream';
+    const stub = streamStub(id);
+    const genesis = await genesisHash(id, 1);
+    // A stream as it was stored before versioning existed: no `chain` field.
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put('meta', { streamId: id, seq: 0, count: 0, headHash: genesis });
+    });
+
+    const payload = { 9: 'a', 10: 'b' };
+    const appended = await stub.append(payload, 'k-1');
+    expect(appended.status === 'created' && appended.hash).toBe(
+      await nextHash(genesis, payload, 1, 1),
+    );
+    expect(appended.status === 'created' && appended.hash).not.toBe(
+      await nextHash(genesis, payload, 1, 2),
+    );
+    expect((await stub.head()).chainVersion).toBe(1);
+    expect(await stub.verify()).toEqual({ valid: true });
   });
 });
 

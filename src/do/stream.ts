@@ -1,6 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
-import { canonicalize, genesisHash, nextHash } from '../lib/hash';
+import {
+  CHAIN_VERSION,
+  canonicalize,
+  genesisHash,
+  nextHash,
+  type ChainVersion,
+} from '../lib/hash';
 import { mirrorStatement } from '../lib/read-model';
 import { log } from '../lib/log';
 
@@ -14,6 +20,15 @@ interface Meta {
   count: number;
   /** Hash of the most recent event, or the genesis hash when empty. */
   headHash: string;
+  /**
+   * Chain-rule version the stream was created under, kept for life. Absent on
+   * streams created before versioning, which are v1.
+   */
+  chain?: ChainVersion;
+}
+
+function chainVersion(meta: Meta): ChainVersion {
+  return meta.chain ?? 1;
 }
 
 /** A persisted event. */
@@ -136,12 +151,13 @@ export class StreamDO extends DurableObject<Env> {
       const existing = await this.ctx.storage.get<Meta>(META_KEY);
       if (existing) return { created: false };
 
-      const headHash = await genesisHash(streamId);
+      const headHash = await genesisHash(streamId, CHAIN_VERSION);
       await this.ctx.storage.put<Meta>(META_KEY, {
         streamId,
         seq: 0,
         count: 0,
         headHash,
+        chain: CHAIN_VERSION,
       });
       return { created: true };
     });
@@ -189,7 +205,7 @@ export class StreamDO extends DurableObject<Env> {
 
       const seq = meta.seq + 1;
       const prevHash = meta.headHash;
-      const hash = await nextHash(prevHash, payload, seq);
+      const hash = await nextHash(prevHash, payload, seq, chainVersion(meta));
       const createdAt = Date.now();
       const event: StoredEvent = { seq, prevHash, hash, payload, createdAt };
 
@@ -235,11 +251,14 @@ export class StreamDO extends DurableObject<Env> {
     });
   }
 
-  /** O(1) head of the log: total count and the current head hash. */
-  async head(): Promise<{ count: number; headHash: string }> {
+  /**
+   * O(1) head of the log: total count, the current head hash, and the chain
+   * version an external verifier needs to recompute it.
+   */
+  async head(): Promise<{ count: number; headHash: string; chainVersion: ChainVersion }> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     if (!meta) throw new Error('stream not initialized');
-    return { count: meta.count, headHash: meta.headHash };
+    return { count: meta.count, headHash: meta.headHash, chainVersion: chainVersion(meta) };
   }
 
   /**
@@ -285,14 +304,15 @@ export class StreamDO extends DurableObject<Env> {
     // Walk exactly the history this snapshot of `meta` commits to. If the
     // runtime ever delivered an append during one of the awaits below, its
     // event would sit past `meta.seq` and must not read as tampering.
-    let prev = await genesisHash(meta.streamId);
+    const version = chainVersion(meta);
+    let prev = await genesisHash(meta.streamId, version);
     let seq = 0;
     for await (const event of this.iterateEvents(meta.seq)) {
       seq += 1;
       if (event.seq !== seq || event.prevHash !== prev) {
         return { valid: false, brokenAt: seq };
       }
-      const expected = await nextHash(prev, event.payload, seq);
+      const expected = await nextHash(prev, event.payload, seq, version);
       if (expected !== event.hash) {
         return { valid: false, brokenAt: seq };
       }

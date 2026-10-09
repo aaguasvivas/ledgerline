@@ -9,8 +9,8 @@
 export const DEMO_STREAM_ID = '7221f193-c32f-4bed-b13e-d83a20fdf66c';
 
 /**
- * Three events from a recorded run, with hashes exactly as the API returned
- * them. test/landing.test.ts replays these through a real StreamDO, so the
+ * Three events with the hashes the API assigns them under the current chain
+ * version. test/landing.test.ts replays them through a real StreamDO, so the
  * page cannot drift from the server's hash rule.
  */
 export const DEMO_EVENTS = [
@@ -18,19 +18,19 @@ export const DEMO_EVENTS = [
     seq: 1,
     idempotencyKey: 'invoice-001',
     payload: { type: 'invoice.paid', invoice: 'INV-001', amount: 100, currency: 'USD' },
-    hash: '1a902c0da42aec20ad1249445ab94bc993d183e45021b3b23460e176400be1c5',
+    hash: '5a02b02016ac13025fd8b2b7c6d4f15165806def2a2e14853f152fc5ffc98526',
   },
   {
     seq: 2,
     idempotencyKey: 'invoice-002',
     payload: { type: 'invoice.paid', invoice: 'INV-002', amount: 250, currency: 'USD' },
-    hash: '78b26ad78ca1f628ccd41085d737f7d7b286da9141e7936025758ece98178647',
+    hash: 'a9ad4bb8a510c9593651eae43f5ad17bb4e9b5a4ce8907e3331cf9ef2ff1b905',
   },
   {
     seq: 3,
     idempotencyKey: 'refund-001',
     payload: { type: 'invoice.refunded', invoice: 'INV-001', amount: -50, currency: 'USD' },
-    hash: '55c73ba9789c2d288f7c45a26fd24ded2a4f33e49648ec05138005764e0bb03b',
+    hash: '8f0f4f553936af0d0c0d9db27f6b0b5e85bb07ee16d81c5f510b29ead4233700',
   },
 ];
 
@@ -401,7 +401,7 @@ const PAGE = `<!doctype html>
     <p>These three events and their hashes come from a recorded run of the API. Your browser is recomputing the chain <strong>right now</strong> with the same public rule the server uses. Change any amount and watch <code>verify</code> find the exact event you touched, and every event after it go invalid.</p>
   </div>
 
-  <div class="rule"><span class="g">hash_0</span> = SHA-256("ledgerline:v1:" + streamId)                  <span class="c">genesis</span>
+  <div class="rule"><span class="g">hash_0</span> = SHA-256("ledgerline:v2:" + streamId)                  <span class="c">genesis</span>
 <span class="g">hash_n</span> = SHA-256(hash_n-1 + "|" + JCS(payload_n) + "|" + n)    <span class="c">JCS = RFC 8785 canonical JSON</span></div>
 
   <div class="controls">
@@ -410,7 +410,7 @@ const PAGE = `<!doctype html>
     <span class="status" id="status">recomputing chain in your browser…</span>
   </div>
 
-  <div class="genesis"><span>genesis = SHA-256("ledgerline:v1:${DEMO_STREAM_ID}")</span><span>= <span class="h" id="genesis">…</span></span></div>
+  <div class="genesis"><span>genesis = SHA-256("ledgerline:v2:${DEMO_STREAM_ID}")</span><span>= <span class="h" id="genesis">…</span></span></div>
   <ol class="chain" id="chain">${BLOCKS}
   </ol>
   <p class="hint">On the server, "editing a payload" means writing to the Durable Object's storage directly. The test suite does exactly that, and also forges a <code>prevHash</code>, deletes a middle event, and truncates the tail. Each time, <code>verify</code> must name the first broken seq.</p>
@@ -480,10 +480,10 @@ const PAGE = `<!doctype html>
 <pre class="term"><span class="c"># 1. the original append</span>
 <span class="q">→ POST /v1/streams/7221f193…/events   Idempotency-Key: invoice-001</span>
 <span class="q">  {"type":"invoice.paid","invoice":"INV-001","amount":100,"currency":"USD"}</span>
-<span class="s2">← 201</span> {"seq":1,"hash":"<span class="h">1a902c0da42aec20…</span>"}
+<span class="s2">← 201</span> {"seq":1,"hash":"<span class="h">5a02b02016ac1302…</span>"}
 
 <span class="c"># 2. same key, same body: a timeout made the client retry</span>
-<span class="s2">← 200</span> {"seq":1,"hash":"<span class="h">1a902c0da42aec20…</span>"}   <span class="s2">Idempotent-Replay: true</span>
+<span class="s2">← 200</span> {"seq":1,"hash":"<span class="h">5a02b02016ac1302…</span>"}   <span class="s2">Idempotent-Replay: true</span>
 
 <span class="c"># 3. same key, DIFFERENT body ("amount": 99999)</span>
 <span class="s4">← 422</span> {"error":{"code":"idempotency_key_reused","message":"Idempotency-Key was already used for seq 1 with a different payload"}}</pre>
@@ -617,7 +617,7 @@ const PAGE = `<!doctype html>
   function recompute() {
     var token = ++run;
     var hashes = [];
-    var chain = sha256Hex('ledgerline:v1:' + STREAM_ID).then(function (genesis) {
+    var chain = sha256Hex('ledgerline:v2:' + STREAM_ID).then(function (genesis) {
       $('genesis').textContent = short(genesis);
       return genesis;
     });

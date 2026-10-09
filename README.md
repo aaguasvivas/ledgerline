@@ -28,7 +28,7 @@ Around that core: a D1 read model fed by a transactional outbox (it can lag, but
 **Engineering highlights**
 
 - **Tests that check the mechanism, not just the outcome.** The concurrency suite forces the race that `blockConcurrencyWhile` defends against, so deleting the guard makes it fail.
-- **Conformance-tested.** The canonical form is pinned to RFC 8785's own worked examples, which is how a key-ordering bug in an earlier canonicalizer surfaced.
+- **Conformance-tested, and versioned.** The canonical form is pinned to RFC 8785's own worked examples, which is how a key-ordering bug in the original canonicalizer surfaced. The fix shipped as a new per-stream chain version, so streams written under the old rule keep verifying.
 - **88 tests in the real Workers runtime** (workerd), against real Durable Objects and a local D1. Nothing about the platform is mocked.
 
 ---
@@ -131,7 +131,7 @@ curl -s -X POST $BASE/v1/streams/$SID/events \
 
 # 5. Read the O(1) head and verify the whole chain.
 curl -s $BASE/v1/streams/$SID/head   -H "Authorization: Bearer $KEY"
-# → {"count":1,"headHash":"6d8a9d…"}
+# → {"count":1,"headHash":"6d8a9d…","chainVersion":2}
 curl -s $BASE/v1/streams/$SID/verify -H "Authorization: Bearer $KEY"
 # → {"valid":true}
 ```
@@ -199,7 +199,8 @@ curl -X POST $BASE/v1/streams/$SID/events -H "Authorization: Bearer $KEY" \
 `nextAfter` is the cursor for the next page (the last `seq` when a full page was returned), or `null` at the end.
 
 ### `GET /v1/streams/:id/head`: O(1) head (Durable Object)
-→ `{ "count": 2, "headHash": "68984989…" }`
+→ `{ "count": 2, "headHash": "68984989…", "chainVersion": 2 }`
+(`chainVersion` is the [hash-chain rule version](#versioning) the stream was created under.)
 
 ### `GET /v1/streams/:id/stats`: per-minute rollups (Durable Object)
 → `{ "total": 2, "perMinute": [ { "minute": 29713435, "count": 2 } ] }`
@@ -217,7 +218,7 @@ Tamper-evidence is fully specified and versioned, so anyone can recompute and au
 
 ```
 canonical JSON   = RFC 8785 (JSON Canonicalization Scheme)
-hash_0 (genesis) = SHA-256("ledgerline:v1:" + streamId)                          (hex)
+hash_0 (genesis) = SHA-256("ledgerline:v2:" + streamId)                          (hex)
 hash_n           = SHA-256(hash_{n-1} + "|" + canonicalJSON(payload_n) + "|" + n)  (hex)
 ```
 
@@ -228,6 +229,17 @@ Each stored event keeps both `prevHash` and `hash`. `verify` walks from genesis 
 - Strings are serialized as ECMAScript `JSON.stringify` emits them, with non-ASCII characters unescaped (`"héllo 🚀"`).
 - Numbers use ECMAScript number-to-string form (`-0` → `0`, `1e21` → `1e+21`, `1.5e-7` → `1.5e-7`); integers beyond 2^53 lose precision at `JSON.parse`, like in any JS service.
 - Python's `json.dumps(sort_keys=True)` is **not** a substitute: it writes `1.5e-07` and sorts keys outside the Basic Multilingual Plane differently. Use an RFC 8785 library.
+
+### Versioning
+
+The rules are versioned **per stream**: a stream records the version it was created under (reported as `chainVersion` by `GET …/head`) and keeps it for life, so changing the rules never re-judges existing history.
+
+| Version | Canonical form | Genesis prefix |
+|---|---|---|
+| **2** (current) | RFC 8785 | `ledgerline:v2:` |
+| 1 | keys re-sorted, then `JSON.stringify`; engines put integer-like keys (`"9"`, `"10"`) first in numeric order, the one place it differs from RFC 8785 | `ledgerline:v1:` |
+
+v1 streams keep appending and verifying under v1 rules. Putting the version in the genesis prefix means a v1 chain and a v2 chain can never be mistaken for one another. Known-answer vectors for both versions, cross-checked against an independent implementation, are pinned in `test/hash.test.ts`.
 
 ---
 
@@ -299,7 +311,7 @@ What's covered:
 6. **Auth**: missing/invalid bearer → `401`; another key's stream → `404`; the admin guard fails closed when its secret is unset.
 7. **Durability**: state survives Durable Object eviction: seq continues, idempotency records replay, drained rate buckets stay drained.
 8. **Input limits**: oversized, too-deep, non-UTF-8, non-finite, and unpaired-surrogate payloads fail as typed 4xx errors, never 500s; an oversized chunked upload is abandoned near the cap instead of being read to the end.
-9. **Canonical-form contract**: RFC 8785's worked examples, known-answer SHA-256 vectors, `__proto__` round-trip fidelity, and unescaped-unicode bytes.
+9. **Canonical-form contract**: RFC 8785's worked examples, known-answer SHA-256 vectors for both chain versions (cross-checked against an independent implementation), a v1 stream that keeps appending and verifying under v1 rules, `__proto__` round-trip fidelity, and unescaped-unicode bytes.
 10. **The demo page**: the chain embedded in `/` is replayed through a real `StreamDO`, so the page can never drift from the server's hash rule.
 
 CI (`.github/workflows/ci.yml`) runs typecheck + tests on every push to `main` and on every pull request.

@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import { fetchApi } from './helpers';
 import { DEMO_EVENTS, DEMO_STREAM_ID } from '../src/worker/landing';
+import { CHAIN_VERSION } from '../src/lib/hash';
 import type { StreamDO } from '../src/do/stream';
 
 describe('GET /', () => {
@@ -14,6 +15,9 @@ describe('GET /', () => {
     expect(html).toContain('id="chain"');
     for (const ev of DEMO_EVENTS) expect(html).toContain(`id="block-${ev.seq}"`);
     expect(html).toContain('https://adelsonaguasvivas.com');
+    // The rule the page shows and recomputes is the current chain version's.
+    expect(html).toContain(`ledgerline:v${CHAIN_VERSION}:`);
+    expect(html).not.toMatch(new RegExp(`ledgerline:v(?!${CHAIN_VERSION}:)`));
   });
 
   it('points Open Graph tags at absolute URLs on the requesting origin', async () => {
