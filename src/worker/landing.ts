@@ -11,7 +11,8 @@ export const DEMO_STREAM_ID = '7221f193-c32f-4bed-b13e-d83a20fdf66c';
 /**
  * Three events with the hashes the API assigns them under the current chain
  * version. test/landing.test.ts replays them through a real StreamDO, so the
- * page cannot drift from the server's hash rule.
+ * page cannot drift from the server's hash rule. docs/tamper.png and
+ * src/worker/og.png show these hashes too; retake both when they change.
  */
 export const DEMO_EVENTS = [
   {
@@ -36,9 +37,25 @@ export const DEMO_EVENTS = [
 
 const REPO_URL = 'https://github.com/aaguasvivas/ledgerline';
 const AUTHOR_URL = 'https://adelsonaguasvivas.com';
-const TITLE = 'Ledgerline: an append-only log that can prove its own history';
+const TITLE = 'Ledgerline: an append-only log that makes rewriting history detectable';
 const DESCRIPTION =
-  'Exactly-once appends, gap-free ordering, and a SHA-256 hash chain anyone can re-verify. An event-stream API on Cloudflare Workers and Durable Objects.';
+  'Exactly-once appends, gap-free ordering, and a SHA-256 hash chain you can recompute yourself. An event-stream API on Cloudflare Workers and Durable Objects.';
+const testFile = (name: string) => `${REPO_URL}/blob/main/test/${name}`;
+
+/**
+ * Bugs found in review, each fixed and pinned by a regression test in `test`.
+ * The stats strip counts this list, so the two cannot disagree.
+ */
+const BUGS = [
+  { text: 'An own <code>"__proto__"</code> key silently dropped from the hashed form.', test: 'hash.test.ts' },
+  { text: 'Numeric-string keys ("9", "10") hashed out of RFC 8785 order; fixed as a new chain version, so existing streams still verify.', test: 'hash.test.ts' },
+  { text: '<code>verify</code> blind to a truncated tail, and to a forged <code>prevHash</code>.', test: 'stream-do.test.ts' },
+  { text: 'A retry with a different body answered as a successful replay.', test: 'read-model-integrity.test.ts' },
+  { text: 'A failed D1 write leaving a permanent hole in the read model.', test: 'read-model-integrity.test.ts' },
+  { text: 'A read-model page that skipped over an event still in the outbox.', test: 'read-model-integrity.test.ts' },
+  { text: 'An oversized upload buffered in full before its size was checked.', test: 'payload-validation.test.ts' },
+  { text: 'An admin guard that failed open when its secret was unset.', test: 'admin-secret.test.ts' },
+];
 
 const short = (hash: string) => `${hash.slice(0, 16)}…`;
 
@@ -50,6 +67,32 @@ function escapeAttr(value: string): string {
 export function renderLanding(origin: string): string {
   return PAGE.replaceAll('__ORIGIN__', escapeAttr(origin));
 }
+
+const BUG_ITEMS = BUGS.map(
+  (bug) =>
+    `<li>${bug.text}<a class="tf" href="${testFile(bug.test)}">test/${bug.test}</a></li>`,
+).join('\n        ');
+
+/** The hero's compact chain; render() keeps it in sync with the full demo. */
+const MINI = DEMO_EVENTS.map(
+  (ev, i) =>
+    `${i ? '<li class="ma">→</li>' : ''}<li class="mb" id="mini-${ev.seq}"><b>#${ev.seq}</b><span id="miniH-${ev.seq}">${ev.hash.slice(0, 10)}…</span></li>`,
+).join('');
+
+/** Partial-failure rows for the page; the README carries the full table. */
+const FAILURES = [
+  ['Response lost after commit; the client retries', 'Original <code>{seq, hash}</code>, <code>200</code>, <code>Idempotent-Replay: true</code>. No second event.', 'api.test.ts'],
+  ['Five retries of one key in flight at once', 'One event and four replays.', 'concurrency.test.ts'],
+  ['D1 rejects the inline insert after the commit', 'The client still gets its <code>201</code>; the outbox alarm delivers the row.', 'read-model-integrity.test.ts'],
+  ['D1 is missing a seq while the outbox catches up', 'Pages end before the hole, so no reader following the cursor skips it.', 'read-model-integrity.test.ts'],
+  ['The Durable Object is evicted mid-stream', 'Seq continues; old keys still replay, or <code>422</code> on a different body.', 'concurrency.test.ts'],
+  ['An append lands while <code>verify</code> is walking', 'No false alarm: verify checks the head it started from.', 'stream-do.test.ts'],
+]
+  .map(
+    ([failure, outcome, test]) =>
+      `<tr><td>${failure}</td><td>${outcome}</td><td><a href="${testFile(test)}">${test}</a></td></tr>`,
+  )
+  .join('\n          ');
 
 /** Server-rendered chain blocks, so the chain is visible before (or without) JS. */
 const BLOCKS = DEMO_EVENTS.map((ev, i) => {
@@ -103,6 +146,7 @@ const PAGE = `<!doctype html>
 <meta name="author" content="Adelson Aguasvivas">
 <meta name="theme-color" content="#0B0E13">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="Adelson Aguasvivas">
 <meta property="og:title" content="${TITLE}">
 <meta property="og:description" content="${DESCRIPTION}">
 <meta property="og:url" content="__ORIGIN__/">
@@ -143,15 +187,19 @@ const PAGE = `<!doctype html>
   h2 { font-size: clamp(1.75rem, 1.3rem + 1.5vw, 2.4rem); line-height: 1.12; }
   h3 { font: 600 1.05rem/1.35 var(--sans); margin: 0; }
   p { margin: 0; }
+  p, li { text-wrap: pretty; }
 
   /* nav */
   .nav { position: sticky; top: 0; z-index: 10; background: rgba(11, 14, 19, 0.82); backdrop-filter: saturate(140%) blur(10px); -webkit-backdrop-filter: saturate(140%) blur(10px); border-bottom: 1px solid var(--line-soft); }
   .nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 3.75rem; gap: 1rem; }
+  .brandrow { display: flex; align-items: center; gap: 0.85rem; min-width: 0; }
   .brand { display: inline-flex; align-items: center; gap: 0.6rem; color: var(--ink); text-decoration: none; font: 600 1.02rem/1 var(--sans); letter-spacing: -0.01em; }
+  .by { color: var(--muted); font-size: 0.88rem; text-decoration: none; padding-left: 0.85rem; border-left: 1px solid var(--line); white-space: nowrap; }
+  .by:hover { color: var(--ink); }
   .logo { width: 28px; height: 14px; fill: none; stroke: var(--gold); stroke-width: 1.6; }
   .logo .tip { fill: var(--gold); }
   .nav ul { display: flex; gap: 1.6rem; list-style: none; margin: 0; padding: 0; font-size: 0.9rem; }
-  .nav ul a { color: var(--muted); text-decoration: none; }
+  .nav ul a { color: var(--muted); text-decoration: none; white-space: nowrap; }
   .nav ul a:hover { color: var(--ink); }
   .nav .gh { color: var(--ink); }
 
@@ -175,19 +223,27 @@ const PAGE = `<!doctype html>
   .proof { background: linear-gradient(180deg, var(--panel), #0F141B); border: 1px solid var(--line); border-radius: 14px; padding: 1.4rem 1.4rem 1.2rem; box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.7); font: 0.84rem/1.6 var(--mono); transition: border-color 0.3s; }
   .proof.broken { border-color: rgba(242, 89, 79, 0.55); }
   .proof-top { display: flex; align-items: center; gap: 0.55rem; color: var(--muted); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; }
-  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(63, 191, 115, 0.6); animation: pulse 2.4s infinite; }
-  .proof.broken .pulse { background: var(--bad); animation: none; }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(63, 191, 115, 0.55); } 70% { box-shadow: 0 0 0 9px rgba(63, 191, 115, 0); } 100% { box-shadow: 0 0 0 0 rgba(63, 191, 115, 0); } }
-  .proof-req { margin-top: 1.1rem; color: var(--ink); overflow-wrap: anywhere; }
-  .proof-req .verb { color: var(--gold); font-weight: 600; margin-right: 0.4rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-dim); transition: background 0.3s, box-shadow 0.3s; }
+  .proof.broken .dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-dim); }
+  .proof-req { margin-top: 1.1rem; color: var(--muted); overflow-wrap: anywhere; font-size: 0.8rem; }
+  .proof-req .lbl { display: block; font-size: 0.7rem; letter-spacing: 0.04em; color: var(--faint); margin-bottom: 0.15rem; }
+  .proof-req .verb { color: var(--gold); font-weight: 600; margin-right: 0.45rem; }
+  .proof-req .path { color: var(--ink); }
   .proof-res { margin: 0.55rem 0 1rem; padding: 0.75rem 0.9rem; border-radius: 9px; background: var(--ok-dim); color: var(--ok); font: 600 0.95rem/1.4 var(--mono); border: 1px solid rgba(63, 191, 115, 0.3); transition: background 0.3s, color 0.3s, border-color 0.3s; }
   .proof.broken .proof-res { background: var(--bad-dim); color: var(--bad); border-color: rgba(242, 89, 79, 0.35); }
-  .proof dl { margin: 0; display: grid; gap: 0.3rem; }
-  .proof dl div { display: flex; justify-content: space-between; gap: 1rem; border-top: 1px dashed var(--line); padding-top: 0.3rem; }
-  .proof dt { color: var(--muted); }
-  .proof dd { margin: 0; color: var(--ink); text-align: right; }
-  .proof dd.bad { color: var(--bad); }
-  .proof-cta { display: inline-block; margin-top: 1rem; font: 600 0.8rem/1 var(--sans); }
+  .mini { list-style: none; margin: 0 0 1.1rem; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); gap: 0.35rem; align-items: center; }
+  .mb { background: var(--panel-2); border: 1px solid var(--line); border-top: 2px solid var(--ok); border-radius: 8px; padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; transition: border-color 0.25s; }
+  .mb b { color: var(--gold); font-size: 0.82rem; }
+  .mb span { font-size: 0.68rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mb.bad { border-color: rgba(242, 89, 79, 0.6); border-top-color: var(--bad); }
+  .mb.bad span { color: var(--bad); }
+  .ma { color: var(--gold); font-size: 0.9rem; }
+  .proof-foot { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding-top: 0.9rem; border-top: 1px dashed var(--line); }
+  .proof-foot small { color: var(--muted); font-size: 0.78rem; }
+  .proof-foot small b { color: var(--ink); font-weight: 600; }
+  .proof-foot small b.bad { color: var(--bad); }
+  .tamper-btn { font: 600 0.84rem/1 var(--sans); color: var(--gold); background: var(--gold-dim); border: 1px solid rgba(227, 179, 65, 0.45); border-radius: 8px; padding: 0.65rem 0.9rem; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+  .tamper-btn:hover { background: rgba(227, 179, 65, 0.2); border-color: var(--gold); }
 
   /* stats */
   .stats { border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); background: rgba(18, 24, 33, 0.5); }
@@ -196,6 +252,9 @@ const PAGE = `<!doctype html>
   .stats li:first-child { border-left: none; padding-left: 0; }
   .stats b { font: 600 1.7rem/1.1 var(--serif); color: var(--ink); letter-spacing: -0.01em; }
   .stats span { font-size: 0.86rem; color: var(--muted); line-height: 1.5; }
+  .statlink { display: flex; flex-direction: column; gap: 0.3rem; text-decoration: none; color: inherit; }
+  .statlink b::after { content: " →"; color: var(--gold); font-size: 0.75em; }
+  .statlink:hover b { color: var(--gold); }
 
   /* sections */
   main > section.wrap { margin-top: 6.5rem; }
@@ -204,8 +263,10 @@ const PAGE = `<!doctype html>
   .head p strong { color: var(--ink); font-weight: 500; }
 
   /* tamper demo */
-  .rule { font: 0.84rem/1.75 var(--mono); background: #090C10; border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.25rem; overflow-x: auto; white-space: pre; color: var(--ink); margin: 0 0 1.25rem; }
+  .rule { font: 0.84rem/1.75 var(--mono); background: #090C10; border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.25rem; color: var(--ink); margin: 0 0 1.25rem; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.15rem 2.5rem; }
+  .rule .f { white-space: pre-wrap; padding-left: 2ch; text-indent: -2ch; }
   .rule .c { color: var(--faint); }
+  .rule .c::before { content: "// "; }
   .rule .g { color: var(--gold); }
   .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem; margin-bottom: 1.25rem; }
   .banner { display: inline-flex; align-items: center; gap: 0.6rem; padding: 0.7rem 1rem; border-radius: 10px; font: 600 0.9rem/1.3 var(--mono); border: 1px solid rgba(63, 191, 115, 0.45); background: var(--ok-dim); color: var(--ok); transition: background 0.25s, border-color 0.25s, color 0.25s; }
@@ -214,18 +275,20 @@ const PAGE = `<!doctype html>
   button.reset:hover { border-color: var(--gold); color: var(--gold); }
   .status { font: 0.8rem/1.5 var(--mono); color: var(--muted); }
   .status.ok { color: var(--ok); }
-  .genesis { display: inline-flex; flex-wrap: wrap; gap: 0.25rem 0.6rem; font: 0.78rem/1.5 var(--mono); color: var(--muted); background: var(--panel); border: 1px dashed var(--line); border-radius: 9px; padding: 0.55rem 0.9rem; margin-bottom: 0.9rem; max-width: 100%; }
+  .genesis { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.25rem 0.6rem; font: 0.78rem/1.5 var(--mono); color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 9px; padding: 0.55rem 0.9rem; margin-bottom: 0.9rem; }
+  .seq0 { font: 600 0.9rem/1 var(--mono); color: var(--faint); margin-right: 0.6rem; }
   .genesis .h { color: var(--gold); }
   .chain { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; }
   .block { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--ok); border-radius: 12px; padding: 1rem 1.1rem 0.9rem; display: flex; flex-direction: column; gap: 0.8rem; transition: border-color 0.25s, opacity 0.25s; min-width: 0; }
   .block.broken { border-color: var(--bad); border-top-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-dim); }
-  .block.downstream { border-top-color: var(--bad); opacity: 0.8; }
+  .block.downstream { border-top-color: var(--bad); border-style: dashed; border-top-style: solid; }
   .block-top { display: flex; align-items: baseline; gap: 0.6rem; }
   .seq { font: 600 1.05rem/1 var(--mono); color: var(--gold); }
   .etype { font: 0.76rem/1.4 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .amount { display: flex; align-items: center; gap: 0.55rem; font: 0.8rem/1 var(--mono); color: var(--muted); }
-  .amount input { font: 600 0.95rem/1.2 var(--mono); color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; width: 6.5rem; padding: 0.4rem 0.55rem; }
-  .amount input:hover { border-color: var(--muted); }
+  .amount input { font: 600 0.95rem/1.2 var(--mono); color: var(--ink); background: rgba(227, 179, 65, 0.06); border: 1px dashed rgba(227, 179, 65, 0.55); border-radius: 7px; width: 6.5rem; padding: 0.4rem 0.55rem; appearance: textfield; -moz-appearance: textfield; cursor: text; }
+  .amount input::-webkit-inner-spin-button, .amount input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .amount input:hover { border-style: solid; border-color: var(--gold); }
   .amount input:focus { outline: 2px solid var(--gold); outline-offset: 1px; border-color: var(--gold); }
   .hashes { margin: 0; display: grid; gap: 0.2rem; font: 0.76rem/1.55 var(--mono); }
   .hashes div { display: flex; justify-content: space-between; gap: 0.75rem; }
@@ -248,6 +311,8 @@ const PAGE = `<!doctype html>
   .card p { color: var(--muted); font-size: 0.94rem; }
   .card p code { font-size: 0.8rem; }
   .proofline { margin-top: auto; padding-top: 0.9rem; border-top: 1px solid var(--line-soft); display: flex; gap: 0.55rem; font: 0.76rem/1.55 var(--mono); color: var(--ink); }
+  .proofline a { color: inherit; text-decoration-color: var(--line); }
+  .proofline a:hover { color: var(--gold); text-decoration-color: var(--gold); }
   .proofline svg { flex: none; width: 1rem; height: 1rem; color: var(--ok); margin-top: 0.15rem; }
 
   /* architecture */
@@ -277,19 +342,16 @@ const PAGE = `<!doctype html>
   .term .h { color: var(--gold); }
   .after { margin-top: 1.25rem; color: var(--muted); max-width: 50rem; }
   .after strong { color: var(--ink); font-weight: 500; }
-  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
-  .two h3 { margin-bottom: 0.4rem; }
-  .two .sub { color: var(--muted); font-size: 0.92rem; margin-bottom: 1rem; }
   .tbl { border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; background: var(--panel); font-size: 0.84rem; }
   th, td { text-align: left; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   th { font: 600 0.66rem/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); }
   td { font-family: var(--mono); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-  td.txt { font-family: var(--sans); font-size: 0.86rem; white-space: normal; }
-  .pill { display: inline-block; font: 600 0.7rem/1 var(--mono); border-radius: 5px; padding: 0.3rem 0.45rem; }
-  .pill.ok { color: var(--ok); background: var(--ok-dim); }
-  .pill.bad { color: var(--bad); background: var(--bad-dim); }
+  .fm td { font: 0.88rem/1.5 var(--sans); white-space: normal; vertical-align: top; color: var(--muted); }
+  .fm td:first-child { color: var(--ink); font-weight: 500; width: 34%; }
+  .fm td:last-child { font: 0.76rem/1.5 var(--mono); white-space: nowrap; }
+  .fm td code { font-size: 0.78rem; }
 
   /* trade-offs + testing */
   .tradeoffs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.1rem; list-style: none; margin: 0; padding: 0; }
@@ -304,6 +366,8 @@ const PAGE = `<!doctype html>
   .bugs h3 { margin-bottom: 0.9rem; }
   .bugs ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.7rem; }
   .bugs li { position: relative; padding-left: 1.4rem; font-size: 0.92rem; color: var(--muted); }
+  .bugs .tf { display: block; width: max-content; margin-top: 0.2rem; font: 0.72rem/1.4 var(--mono); color: var(--faint); text-decoration: none; }
+  .bugs .tf:hover { color: var(--gold); text-decoration: underline; }
   .bugs li::before { content: ""; position: absolute; left: 0; top: 0.55rem; width: 0.5rem; height: 0.5rem; border-radius: 2px; background: var(--gold); }
 
   /* footer */
@@ -315,8 +379,16 @@ const PAGE = `<!doctype html>
 
   @media (max-width: 960px) {
     .hero { padding-top: 3.5rem; }
-    .hero .wrap, .arch, .two, .testing { grid-template-columns: minmax(0, 1fr); }
-    .hero .wrap { gap: 2.75rem; }
+    .hero .wrap, .arch, .testing { grid-template-columns: minmax(0, 1fr); }
+    .hero .wrap { gap: 1.5rem; }
+    /* Phones: show the proof card right after the lede, ahead of the buttons. */
+    .hero-copy { display: contents; }
+    .hero-copy .eyebrow { order: 1; }
+    .hero h1 { order: 2; }
+    .lede { order: 3; }
+    .proof { order: 4; margin: 0.5rem 0; }
+    .ctas { order: 5; }
+    .stack { order: 6; }
     .cards { grid-template-columns: minmax(0, 1fr); }
     .stats ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .stats li:nth-child(3) { border-left: none; padding-left: 0; }
@@ -329,14 +401,30 @@ const PAGE = `<!doctype html>
   }
   @media (max-width: 640px) {
     body { font-size: 16px; }
+    .hero { padding-top: 2.25rem; }
     .wrap { padding: 0 1rem; }
-    .nav ul li:not(:last-child) { display: none; }
+    .nav ul { display: none; }
+    .by { font-size: 0.8rem; padding-left: 0.7rem; }
+    .brandrow { gap: 0.7rem; }
     main > section.wrap { margin-top: 4.75rem; }
     .stats li { padding: 1.2rem 1rem 1.2rem 0; }
     .stats li:nth-child(even) { padding-left: 1rem; }
     .stats b { font-size: 1.4rem; }
-    th, td { padding: 0.55rem 0.65rem; }
-    .rule { font-size: 0.76rem; }
+    .rule { grid-template-columns: minmax(0, 1fr); font-size: 0.74rem; padding: 0.9rem 1rem; }
+    .proof { padding: 1.1rem 1rem 1rem; }
+    .proof-res { font-size: 0.82rem; }
+    .rule .c { margin-bottom: 0.45rem; }
+    .rule .c:last-child { margin-bottom: 0; }
+    .term { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.74rem; padding: 1rem; }
+    .ctas { flex-direction: column; align-items: stretch; }
+    .ctas .btn { justify-content: center; }
+    footer ul { gap: 0.75rem 1.25rem; }
+    .fm thead { display: none; }
+    .fm tr { display: block; padding: 0.8rem 0.9rem; border-bottom: 1px solid var(--line-soft); }
+    .fm tr:last-child { border-bottom: none; }
+    .fm td { display: block; padding: 0; border: 0; width: auto; }
+    .fm td:first-child { width: auto; margin-bottom: 0.2rem; }
+    .fm td:last-child { margin-top: 0.35rem; }
   }
   @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
@@ -347,7 +435,7 @@ const PAGE = `<!doctype html>
 <body>
 <nav class="nav" aria-label="Primary">
   <div class="wrap">
-    <a class="brand" href="/">${LOGO}Ledgerline</a>
+    <div class="brandrow"><a class="brand" href="/">${LOGO}Ledgerline</a><a class="by" href="${AUTHOR_URL}">by Adelson Aguasvivas</a></div>
     <ul>
       <li><a href="#tamper">Demo</a></li>
       <li><a href="#how">How it works</a></li>
@@ -361,8 +449,8 @@ const PAGE = `<!doctype html>
   <div class="wrap">
     <div class="hero-copy">
       <p class="eyebrow">Event-stream API · Cloudflare Workers + Durable Objects</p>
-      <h1>An append-only log that can <em>prove</em> its own history.</h1>
-      <p class="lede">Ledgerline gives every stream three guarantees that are easy to claim and hard to get right: <strong>exactly-once writes</strong> under retries, <strong>gap-free ordering</strong> under concurrency, and a <strong>SHA-256 hash chain</strong> that exposes any edit to the past. Each stream is its own single-threaded Durable Object, so it needs no locks and no consensus protocol.</p>
+      <h1>An append-only log that makes rewriting history <em>detectable</em>.</h1>
+      <p class="lede">An event-stream API for ledgers and audit logs. Per stream, a retried write takes effect <strong>exactly once</strong>, concurrent writes get a <strong>gap-free order</strong>, and a <strong>SHA-256 hash chain</strong> means editing any past event changes every hash after it. Each stream is a single-threaded Durable Object that the platform runs as one instance, so ordering needs no distributed locks.</p>
       <div class="ctas">
         <a class="btn primary" href="#tamper">Try to tamper with it ↓</a>
         <a class="btn ghost" href="${REPO_URL}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>Read the source</a>
@@ -370,26 +458,22 @@ const PAGE = `<!doctype html>
       <p class="stack">TypeScript (strict) · Hono · Durable Objects · D1 · Vitest in workerd</p>
     </div>
 
-    <aside class="proof" id="proof" aria-label="Live verification of the demo chain">
-      <div class="proof-top"><span class="pulse"></span>Live · recomputed in your browser</div>
-      <div class="proof-req"><span class="verb">GET</span>/v1/streams/7221f193…/verify</div>
+    <aside class="proof" id="proof" aria-label="Verification of the demo chain">
+      <div class="proof-top"><span class="dot"></span>Real hashes · verified in browser</div>
+      <div class="proof-req"><span class="lbl">same check as</span><span class="verb">GET</span><span class="path">/v1/streams/7221f193…/verify</span></div>
       <div class="proof-res" id="proofRes">{ "valid": true }</div>
-      <dl>
-        <div><dt>events</dt><dd>${DEMO_EVENTS.length}</dd></div>
-        <div><dt>links that hold</dt><dd id="proofLinks">${DEMO_EVENTS.length} / ${DEMO_EVENTS.length}</dd></div>
-        <div><dt>recomputed head</dt><dd id="proofHead">${short(DEMO_EVENTS[DEMO_EVENTS.length - 1].hash)}</dd></div>
-      </dl>
-      <a class="proof-cta" href="#tamper">Edit a payload and watch this change ↓</a>
+      <ol class="mini" aria-hidden="true">${MINI}</ol>
+      <div class="proof-foot"><button class="tamper-btn" id="heroTamper" type="button">Tamper with #2</button><small>links that hold <b id="proofLinks">${DEMO_EVENTS.length} / ${DEMO_EVENTS.length}</b></small></div>
     </aside>
   </div>
 </header>
 
 <div class="stats">
   <div class="wrap"><ul>
-    <li><b>88 tests</b><span>in the real Workers runtime, against real Durable Objects and D1. No mocks.</span></li>
-    <li><b>RFC 8785</b><span>canonical JSON, so any standard library can re-verify a chain.</span></li>
-    <li><b>1 actor</b><span>per stream. Ordering comes from the platform, not from locks.</span></li>
-    <li><b>1 call</b><span>re-walks the whole chain and names the first broken event.</span></li>
+    <li><a class="statlink" href="${REPO_URL}/tree/main/test"><b>98 tests</b><span>in workerd, against real Durable Objects and D1, with faults injected on purpose.</span></a></li>
+    <li><b>20 racing writes</b><span>get seq 1 to 20 with no gaps. Delete the concurrency guard and the test fails.</span></li>
+    <li><b>4 tamper cases</b><span>edited payload, forged prevHash, deleted event, cut tail: verify names the first broken seq.</span></li>
+    <li><a class="statlink" href="#testing"><b>${BUGS.length} bugs</b><span>found in review, fixed, and each pinned by a regression test.</span></a></li>
   </ul></div>
 </div>
 
@@ -398,19 +482,18 @@ const PAGE = `<!doctype html>
   <div class="head">
     <p class="eyebrow">Interactive · real hashes, recomputed in your browser</p>
     <h2>Go ahead. Rewrite history.</h2>
-    <p>These three events and their hashes come from a recorded run of the API. Your browser is recomputing the chain <strong>right now</strong> with the same public rule the server uses. Change any amount and watch <code>verify</code> find the exact event you touched, and every event after it go invalid.</p>
+    <p>Three events with exactly the hashes the API assigns them; the test suite replays them through the real Durable Object to keep it that way. Your browser is recomputing the chain <strong>right now</strong> with the same public rule the server uses. Change any amount and watch <code>verify</code> find the exact event you touched, and every event after it go invalid.</p>
   </div>
 
-  <div class="rule"><span class="g">hash_0</span> = SHA-256("ledgerline:v2:" + streamId)                  <span class="c">genesis</span>
-<span class="g">hash_n</span> = SHA-256(hash_n-1 + "|" + JCS(payload_n) + "|" + n)    <span class="c">JCS = RFC 8785 canonical JSON</span></div>
+  <div class="rule"><span class="f"><span class="g">hash_0</span> = SHA-256("ledgerline:v2:" + streamId)</span><span class="c">genesis</span><span class="f"><span class="g">hash_n</span> = SHA-256(hash_n-1 + "|" + JCS(payload_n) + "|" + n)</span><span class="c">JCS = RFC 8785 canonical JSON</span></div>
 
   <div class="controls">
-    <div class="banner" id="banner" role="status" aria-live="polite">GET /verify → { "valid": true }</div>
+    <div class="banner" id="banner" role="status" aria-live="polite">verify → { "valid": true }</div>
     <button class="reset" id="reset" type="button">Reset payloads</button>
     <span class="status" id="status">recomputing chain in your browser…</span>
   </div>
 
-  <div class="genesis"><span>genesis = SHA-256("ledgerline:v2:${DEMO_STREAM_ID}")</span><span>= <span class="h" id="genesis">…</span></span></div>
+  <div class="genesis"><span><span class="seq0">#0</span>genesis = SHA-256("ledgerline:v2:${DEMO_STREAM_ID}")</span><span>= <span class="h" id="genesis">…</span></span></div>
   <ol class="chain" id="chain">${BLOCKS}
   </ol>
   <p class="hint">On the server, "editing a payload" means writing to the Durable Object's storage directly. The test suite does exactly that, and also forges a <code>prevHash</code>, deletes a middle event, and truncates the tail. Each time, <code>verify</code> must name the first broken seq.</p>
@@ -426,19 +509,19 @@ const PAGE = `<!doctype html>
       <div class="ico">${ICON.repeat}</div>
       <h3>Exactly-once appends</h3>
       <p>Every write carries an <code>Idempotency-Key</code>, recorded in the same atomic write as the event. A retry gets the original <code>{seq, hash}</code> back with <code>Idempotent-Replay: true</code>. Reusing a key with a different body is a <code>422</code>, never a silent success.</p>
-      <div class="proofline">${ICON.check}<span>5 concurrent requests racing one key leave exactly 1 event.</span></div>
+      <div class="proofline">${ICON.check}<a href="${testFile('concurrency.test.ts')}">5 concurrent requests racing one key leave exactly 1 event.</a></div>
     </article>
     <article class="card">
       <div class="ico">${ICON.ordered}</div>
       <h3>Gap-free ordering</h3>
       <p>Each stream is one Durable Object: a single-threaded actor with its own storage. Appends run in a <code>blockConcurrencyWhile</code> critical section, so <code>seq</code> is strictly increasing, with no gaps and no duplicates.</p>
-      <div class="proofline">${ICON.check}<span>20 in-flight appends, crypto await forced to yield: seq 1 to 20. Remove the guard and it fails.</span></div>
+      <div class="proofline">${ICON.check}<a href="${testFile('concurrency.test.ts')}">20 in-flight appends, crypto await forced to yield: seq 1 to 20. Remove the guard and it fails.</a></div>
     </article>
     <article class="card">
       <div class="ico">${ICON.link}</div>
       <h3>Tamper evidence</h3>
       <p>Each hash folds in the previous hash, the payload's RFC 8785 canonical form, and the seq. <code>GET /verify</code> re-walks the chain, checks <code>seq</code>, <code>prevHash</code>, and <code>hash</code>, then checks the result against the committed head.</p>
-      <div class="proofline">${ICON.check}<span>Edited payloads, forged links, deleted and truncated events: each caught at the first broken seq.</span></div>
+      <div class="proofline">${ICON.check}<a href="${testFile('stream-do.test.ts')}">Edited payloads, forged links, deleted and truncated events: each caught at the first broken seq.</a></div>
     </article>
   </div>
 </section>
@@ -447,19 +530,19 @@ const PAGE = `<!doctype html>
   <div class="head">
     <p class="eyebrow">Architecture</p>
     <h2>Where a write goes.</h2>
-    <p>The Worker is a stateless front door. <strong>Durable Objects hold the guarantees</strong>: one per stream, one per API key. D1 is a query-friendly read model that may trail the authority by milliseconds, but can never silently lose an event.</p>
+    <p>The Worker is a stateless front door. <strong>Durable Objects hold the guarantees</strong>: one per stream, one per API key. D1 is a query-friendly read model. The Worker mirrors each event into it inline, so a read right after a write usually sees it; if that insert fails, the outbox alarm re-sends it (first sweep within 5 s, then every 30 s while D1 keeps failing). It can trail by seconds, or by the length of an outage, but it cannot lose an event.</p>
   </div>
   <div class="arch">
-    <div class="diagram" role="img" aria-label="Client to Worker over HTTPS; Worker to RateLimiterDO and StreamDO over RPC; StreamDO to the D1 read model via an inline mirror and an outbox alarm">
+    <div class="diagram" role="img" aria-label="Client to Worker over HTTPS. The Worker checks the key and stream ownership in D1, takes a token from RateLimiterDO, and appends through StreamDO over RPC. The Worker mirrors each event into D1 inline; StreamDO's outbox alarm re-sends anything D1 is missing.">
       <div class="node"><b>Client</b><small>Bearer key · Idempotency-Key</small></div>
       <div class="edge">HTTPS</div>
-      <div class="node"><b>Worker (Hono)</b><small>auth · rate limit · route · project</small></div>
-      <div class="edge">RPC, strongly consistent</div>
+      <div class="node"><b>Worker (Hono)</b><small>auth + ownership (D1) · rate limit · route · inline mirror</small></div>
+      <div class="edge">RPC · one instance per key, one per stream</div>
       <div class="pair">
         <div class="node"><b>RateLimiterDO</b><small>1 per key · token bucket</small></div>
         <div class="node auth"><b>StreamDO</b><small>authority · 1 per stream</small></div>
       </div>
-      <div class="edge">inline mirror, then outbox alarm<br>until delivered (INSERT OR IGNORE)</div>
+      <div class="edge">Worker: inline mirror · StreamDO: outbox alarm<br>both INSERT OR IGNORE on (stream_id, seq)</div>
       <div class="node"><b>D1 read model</b><small>paginated reads · eventually consistent</small></div>
     </div>
     <ol class="steps">
@@ -473,7 +556,7 @@ const PAGE = `<!doctype html>
 
 <section id="retries" class="wrap">
   <div class="head">
-    <p class="eyebrow">Recorded run · exactly-once</p>
+    <p class="eyebrow">Exactly-once, on the wire</p>
     <h2>Retry all you want. It is still one event.</h2>
     <p>The same <code>Idempotency-Key</code>, three times: the original request, a network-style retry, and a buggy retry that changed the amount.</p>
   </div>
@@ -490,39 +573,19 @@ const PAGE = `<!doctype html>
   <p class="after">The third answer matters most. A client that reuses a key by mistake <strong>is told so</strong>, instead of receiving a success for a write that never happened. Bodies are compared in canonical form, so an honest retry that only reorders keys still replays.</p>
 </section>
 
-<section id="limits" class="wrap">
-  <div class="two">
-    <div>
-      <p class="eyebrow">Recorded run · rate limiting</p>
-      <h3 style="margin-top:0.6rem">A token bucket that shows its math</h3>
-      <p class="sub">A key minted with <code>rate_per_min: 3</code>. The fourth request is refused, with the exact wait: 60 s ÷ 3 tokens = 20 s.</p>
-      <div class="tbl"><table>
-        <thead><tr><th>request</th><th>status</th><th>remaining</th><th>retry-after</th></tr></thead>
-        <tbody>
-          <tr><td>POST /v1/streams</td><td><span class="pill ok">201</span></td><td>2</td><td>·</td></tr>
-          <tr><td>POST /v1/streams</td><td><span class="pill ok">201</span></td><td>1</td><td>·</td></tr>
-          <tr><td>POST /v1/streams</td><td><span class="pill ok">201</span></td><td>0</td><td>·</td></tr>
-          <tr><td>POST /v1/streams</td><td><span class="pill bad">429</span></td><td>0</td><td>20 s</td></tr>
-        </tbody>
-      </table></div>
-    </div>
-    <div>
-      <p class="eyebrow">The error contract</p>
-      <h3 style="margin-top:0.6rem">Every failure is a typed answer</h3>
-      <p class="sub">One envelope everywhere: <code>{"error":{"code","message"}}</code>. Bad input is a clean <code>4xx</code>, never a <code>500</code>.</p>
-      <div class="tbl"><table>
-        <thead><tr><th>scenario</th><th>status</th><th>code</th></tr></thead>
-        <tbody>
-          <tr><td class="txt">Missing or unknown API key</td><td><span class="pill bad">401</span></td><td>unauthorized</td></tr>
-          <tr><td class="txt">Someone else's stream</td><td><span class="pill bad">404</span></td><td>stream_not_found</td></tr>
-          <tr><td class="txt">No Idempotency-Key</td><td><span class="pill bad">400</span></td><td>idempotency_key_required</td></tr>
-          <tr><td class="txt">Key reused, different body</td><td><span class="pill bad">422</span></td><td>idempotency_key_reused</td></tr>
-          <tr><td class="txt">Body over 256 KiB</td><td><span class="pill bad">413</span></td><td>payload_too_large</td></tr>
-          <tr><td class="txt">Bucket empty</td><td><span class="pill bad">429</span></td><td>rate_limited</td></tr>
-        </tbody>
-      </table></div>
-    </div>
+<section id="failures" class="wrap">
+  <div class="head">
+    <p class="eyebrow">Partial failure</p>
+    <h2>What happens when something breaks.</h2>
+    <p>The interesting part of a distributed system is the half-finished request. Each row is pinned by a test you can read.</p>
   </div>
+  <div class="tbl"><table class="fm">
+    <thead><tr><th>failure</th><th>what happens</th><th>pinned by</th></tr></thead>
+    <tbody>
+          ${FAILURES}
+    </tbody>
+  </table></div>
+  <p class="hint">Rate limits, the full error contract, and every endpoint are in the <a href="${REPO_URL}#api-reference">API reference</a>.</p>
 </section>
 
 <section id="tradeoffs" class="wrap">
@@ -533,10 +596,10 @@ const PAGE = `<!doctype html>
   </div>
   <ul class="tradeoffs">
     <li><strong>One stream, one actor.</strong>Ordering is cheap because a stream never spans machines. That also caps one stream's write rate at what a single Durable Object can serialize. Scale comes from many streams, not one hot one.</li>
-    <li><strong>Tamper-evident, not tamper-proof.</strong>Someone able to rewrite all of storage could rebuild a self-consistent chain. Clients that keep the hashes they were handed will see the head change; anchoring heads externally (signed checkpoints, a transparency log) would close the gap.</li>
-    <li><strong>Verification is O(n).</strong><code>verify</code> re-walks the whole stream every time. A long-lived stream would want signed checkpoints so each verify starts from the last one.</li>
-    <li><strong>Idempotency keys never expire.</strong>A retry is safe at any distance in time, at the cost of one small record per event for the life of the stream. Stripe's keys, for comparison, expire after 24 hours.</li>
-    <li><strong>Reads can trail writes.</strong><code>head</code>, <code>stats</code>, and <code>verify</code> read the authority. Paginated <code>events</code> read D1, which can lag by milliseconds and which the outbox guarantees will catch up.</li>
+    <li><strong>Tamper-evident, not tamper-proof.</strong>Someone able to rewrite all of storage, head included, could rebuild a self-consistent chain, and <code>verify</code> would pass; a test pins exactly that. A client that kept the hash it was handed would see the history behind it change. Anchoring heads externally (signed checkpoints, a transparency log) would close the gap.</li>
+    <li><strong>A hash chain, not a Merkle tree.</strong><code>verify</code> re-walks the whole stream, and showing that one event belongs to a given head means replaying every event after it. A Merkle log, as in Certificate Transparency (RFC 9162), gives O(log n) inclusion proofs. A chain keeps each append to one hash and the whole rule to two lines.</li>
+    <li><strong>Idempotency keys never expire.</strong>A retry is safe at any distance in time, at the cost of one small record per event for the life of the stream. Stripe, for comparison, may prune keys once they are 24 hours old.</li>
+    <li><strong>One D1 database on every request.</strong>Every request resolves its API key and stream ownership in D1, and every append mirrors into it, so total throughput is bounded by one database, and a full D1 outage fails requests with a <code>500</code> before anything is written. Paginated <code>events</code> also read D1: usually current, but after a failed inline insert they wait for the outbox sweep.</li>
     <li><strong>One region per stream.</strong>A Durable Object lives in one location, so far-away clients pay a round trip on writes. That is the price of a single, strongly consistent order.</li>
   </ul>
 </section>
@@ -548,20 +611,14 @@ const PAGE = `<!doctype html>
   </div>
   <div class="testing">
     <div class="facts">
-      <div class="fact"><b>88 tests, 14 files</b><span>Run inside workerd, the real Workers runtime, against real Durable Objects and a local D1. Nothing about the platform is mocked.</span></div>
-      <div class="fact"><b>Mechanisms, not just outcomes</b><span>Concurrency tests force the race the code defends against, and fail if <code>blockConcurrencyWhile</code> is removed. Outage tests break D1 and require the read model to converge anyway.</span></div>
-      <div class="fact"><b>Conformance vectors</b><span>The canonical form is pinned to RFC 8785's own worked examples, plus known-answer SHA-256 vectors that would catch any change to the chain rule.</span></div>
+      <div class="fact"><b>98 tests</b><span>Run inside workerd, the real Workers runtime, against real Durable Objects and a local D1. The only test doubles are deliberate fault injections: SQL triggers and a dropped table that make D1 fail, and a spy on <code>crypto.subtle.digest</code> that forces requests to interleave.</span></div>
+      <div class="fact"><b>Tests that fail when the mechanism is removed</b><span>Delete <code>blockConcurrencyWhile</code> and the concurrency tests fail. Fault tests make D1 reject event inserts and require the read model to converge anyway, without re-sending what it already has.</span></div>
+      <div class="fact"><b>Conformance vectors</b><span>The canonical form is pinned to RFC 8785's own worked examples, plus known-answer SHA-256 vectors for both chain versions, cross-checked against an independent implementation.</span></div>
     </div>
     <div class="bugs">
       <h3>Found in review, fixed, and pinned by a regression test</h3>
       <ul>
-        <li>An own <code>"__proto__"</code> key silently dropped from the hashed form.</li>
-        <li>Numeric-string keys ("9", "10") serialized out of RFC 8785 order.</li>
-        <li><code>verify</code> blind to a truncated tail, and to a forged <code>prevHash</code>.</li>
-        <li>A retry with a different body answered as a successful replay.</li>
-        <li>A failed D1 write leaving a permanent hole in the read model.</li>
-        <li>An oversized upload buffered in full before its size was checked.</li>
-        <li>An admin guard that failed open when its secret was unset.</li>
+        ${BUG_ITEMS}
       </ul>
     </div>
   </div>
@@ -670,13 +727,16 @@ const PAGE = `<!doctype html>
       ? '{ "valid": true }'
       : '{ "valid": false, "brokenAt": ' + brokenAt + ' }';
     $('banner').className = 'banner' + (brokenAt === null ? '' : ' broken');
-    $('banner').textContent = 'GET /verify → ' + result;
+    $('banner').textContent = 'verify → ' + result;
     $('proof').className = 'proof' + (brokenAt === null ? '' : ' broken');
     $('proofRes').textContent = result;
     $('proofLinks').textContent = holding + ' / ' + EVENTS.length;
     $('proofLinks').className = brokenAt === null ? '' : 'bad';
-    $('proofHead').textContent = short(hashes[hashes.length - 1]);
-    $('proofHead').className = brokenAt === null ? '' : 'bad';
+    $('heroTamper').textContent = brokenAt === null ? 'Tamper with #2' : 'Restore';
+    EVENTS.forEach(function (ev, i) {
+      $('miniH-' + ev.seq).textContent = hashes[i].slice(0, 10) + '…';
+      $('mini-' + ev.seq).className = 'mb' + (brokenAt !== null && ev.seq >= brokenAt ? ' bad' : '');
+    });
     var status = $('status');
     if (brokenAt === null) {
       status.className = 'status ok';
@@ -688,8 +748,17 @@ const PAGE = `<!doctype html>
   }
 
   EVENTS.forEach(function (ev) { $('amt-' + ev.seq).addEventListener('input', recompute); });
-  $('reset').addEventListener('click', function () {
+  function reset() {
     EVENTS.forEach(function (ev) { $('amt-' + ev.seq).value = ev.payload.amount; });
+    recompute();
+  }
+  $('reset').addEventListener('click', reset);
+  $('heroTamper').addEventListener('click', function () {
+    var pristine = EVENTS.every(function (ev) {
+      return Number($('amt-' + ev.seq).value) === ev.payload.amount;
+    });
+    if (!pristine) return reset();
+    $('amt-2').value = 2500;
     recompute();
   });
   recompute();
