@@ -45,6 +45,13 @@ export interface AppendResult {
   replay: boolean;
 }
 
+/** Result of a chain verification. */
+export interface VerifyResult {
+  valid: boolean;
+  /** First seq that is missing, out of order, or fails to link. */
+  brokenAt?: number;
+}
+
 const META_KEY = 'meta';
 
 /** Zero-padded so DO storage `list()` returns events in seq order. */
@@ -205,33 +212,42 @@ export class StreamDO extends DurableObject<Env> {
 
   /**
    * Recompute the hash chain from genesis and report the first sequence number
-   * whose stored hash diverges from the recomputed value. An untampered stream
+   * that is missing, out of order, or fails to link. An untampered stream
    * returns `{ valid: true }`.
+   *
+   * Every stored field that the chain vouches for is checked: `seq` must be
+   * contiguous, `prevHash` must equal the recomputed previous hash, and `hash`
+   * must equal the recomputed link. The walk then compares its result with
+   * `meta`, which commits to the true head, so tail truncation is caught too.
    */
-  async verify(): Promise<{ valid: boolean; brokenAt?: number }> {
+  async verify(): Promise<VerifyResult> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     // Missing meta means the authoritative state is gone (storage loss, botched
     // migration). Fail loudly, like head(); never report a vanished log as valid.
     if (!meta) throw new Error('stream not initialized');
 
+    // Walk exactly the history this snapshot of `meta` commits to. If the
+    // runtime ever delivered an append during one of the awaits below, its
+    // event would sit past `meta.seq` and must not read as tampering.
     let prev = await genesisHash(meta.streamId);
-    let count = 0;
-    let lastSeq = 0;
-    for await (const event of this.iterateEvents()) {
-      const expected = await nextHash(prev, event.payload, event.seq);
+    let seq = 0;
+    for await (const event of this.iterateEvents(meta.seq)) {
+      seq += 1;
+      if (event.seq !== seq || event.prevHash !== prev) {
+        return { valid: false, brokenAt: seq };
+      }
+      const expected = await nextHash(prev, event.payload, seq);
       if (expected !== event.hash) {
-        return { valid: false, brokenAt: event.seq };
+        return { valid: false, brokenAt: seq };
       }
       prev = expected;
-      count += 1;
-      lastSeq = event.seq;
     }
 
     // The links recomputed cleanly; now confirm this is the WHOLE chain.
     // Tail truncation leaves a clean prefix; meta commits to the true head, so
     // compare both the event count and the final hash against it.
-    if (count !== meta.count || prev !== meta.headHash) {
-      return { valid: false, brokenAt: lastSeq + 1 };
+    if (seq !== meta.count || prev !== meta.headHash) {
+      return { valid: false, brokenAt: seq + 1 };
     }
     return { valid: true };
   }
@@ -249,13 +265,14 @@ export class StreamDO extends DurableObject<Env> {
     }
   }
 
-  /** Yield every stored event in ascending seq order, paginating storage. */
-  private async *iterateEvents(): AsyncGenerator<StoredEvent> {
+  /** Yield stored events with seq <= `throughSeq`, ascending, paginating storage. */
+  private async *iterateEvents(throughSeq: number): AsyncGenerator<StoredEvent> {
     let cursor: string | undefined;
     for (;;) {
       const batch = await this.ctx.storage.list<StoredEvent>({
         prefix: 'event:',
         startAfter: cursor,
+        end: eventKey(throughSeq + 1),
         limit: 1000,
       });
       if (batch.size === 0) break;
