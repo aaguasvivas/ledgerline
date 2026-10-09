@@ -1,6 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
 import { canonicalize, genesisHash, nextHash } from '../lib/hash';
+import { mirrorStatement } from '../lib/read-model';
+import { log } from '../lib/log';
 
 /** Per-stream metadata; the O(1) head of the log. */
 interface Meta {
@@ -63,6 +65,25 @@ export interface VerifyResult {
 
 const META_KEY = 'meta';
 
+/** Highest seq the outbox sweep has confirmed in D1. Only alarm() writes it. */
+const MIRRORED_KEY = 'mirror:through';
+
+/**
+ * Delay between an append and the outbox sweep that guarantees it reaches D1.
+ * The Worker's inline mirror normally lands first, so the sweep is usually a
+ * no-op confirmation; it exists for the times the inline write does not.
+ */
+const MIRROR_SWEEP_DELAY_MS = 5_000;
+
+/** Back-off after a failed sweep. The alarm reschedules itself indefinitely. */
+const MIRROR_RETRY_DELAY_MS = 30_000;
+
+/** Events per D1 batch (one transaction). */
+const MIRROR_BATCH_SIZE = 100;
+
+/** Batches per sweep; a larger backlog continues in a fresh alarm invocation. */
+const MIRROR_MAX_BATCHES = 10;
+
 /** Zero-padded so DO storage `list()` returns events in seq order. */
 function eventKey(seq: number): string {
   return `event:${String(seq).padStart(12, '0')}`;
@@ -99,7 +120,11 @@ export function streamStub(
  * other events until the critical section completes. The result is strict
  * serialization (monotonic `seq` and exactly-once appends) with no locks,
  * leases, or coordination beyond the platform.
-
+ *
+ * The object also owns delivery to the D1 read model: every append arms an
+ * alarm, and alarm() sweeps committed events into D1 until it confirms the
+ * head (a transactional outbox), so the projection converges even when the
+ * Worker's inline mirror write fails.
  */
 export class StreamDO extends DurableObject<Env> {
   /**
@@ -172,14 +197,25 @@ export class StreamDO extends DurableObject<Env> {
       const existingBucket = await this.ctx.storage.get<number>(
         bucketKey(minute),
       );
+      const sweepPending = (await this.ctx.storage.getAlarm()) !== null;
 
-      // One batched put → atomic commit of every key this append touches.
-      await this.ctx.storage.put({
-        [eventKey(seq)]: event,
-        [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
-        [bucketKey(minute)]: (existingBucket ?? 0) + 1,
-        [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
-      });
+      // One batched put → atomic commit of every key this append touches. The
+      // outbox alarm is armed in the same breath (no await in between, so the
+      // platform coalesces both into one atomic write), but never pushed back
+      // when one is already pending: under steady traffic a timer reset on
+      // every append would never fire.
+      const writes = [
+        this.ctx.storage.put({
+          [eventKey(seq)]: event,
+          [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
+          [bucketKey(minute)]: (existingBucket ?? 0) + 1,
+          [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
+        }),
+      ];
+      if (!sweepPending) {
+        writes.push(this.ctx.storage.setAlarm(createdAt + MIRROR_SWEEP_DELAY_MS));
+      }
+      await Promise.all(writes);
 
       // First append of a new minute: drop rollup buckets that have aged out
       // of the stats window, keeping bucket storage bounded (~60 keys) instead
@@ -270,6 +306,70 @@ export class StreamDO extends DurableObject<Env> {
       return { valid: false, brokenAt: seq + 1 };
     }
     return { valid: true };
+  }
+
+  /**
+   * Outbox sweep: project committed events into the D1 read model, from the
+   * last confirmed seq toward the head, then advance the confirmed watermark.
+   *
+   * Rows are written with INSERT OR IGNORE, so re-sending events the Worker
+   * already mirrored inline is harmless. A failed batch is logged and retried
+   * on our own schedule rather than by throwing: the platform's alarm retries
+   * stop after a handful of attempts, and the read model must converge no
+   * matter how long D1 is unreachable.
+   */
+  override async alarm(): Promise<void> {
+    const meta = await this.ctx.storage.get<Meta>(META_KEY);
+    if (!meta) return;
+    let through = (await this.ctx.storage.get<number>(MIRRORED_KEY)) ?? 0;
+
+    for (let round = 0; round < MIRROR_MAX_BATCHES; round++) {
+      // Re-read the head every round: the D1 round-trip below yields, so
+      // appends may have committed since the last batch.
+      const head = (await this.ctx.storage.get<Meta>(META_KEY))!.seq;
+      if (through >= head) return;
+
+      const batch = await this.ctx.storage.list<StoredEvent>({
+        prefix: 'event:',
+        startAfter: eventKey(through),
+        end: eventKey(head + 1),
+        limit: MIRROR_BATCH_SIZE,
+      });
+      const events = [...batch.values()];
+      if (events.length === 0) {
+        // meta claims events the store does not have; verify() reports this.
+        log.error('mirror_events_missing', { streamId: meta.streamId, through });
+        return;
+      }
+
+      try {
+        await this.env.DB.batch(
+          events.map((event) =>
+            mirrorStatement(this.env.DB, meta.streamId, {
+              seq: event.seq,
+              hash: event.hash,
+              prevHash: event.prevHash,
+              canonicalPayload: canonicalize(event.payload),
+              createdAt: event.createdAt,
+            }),
+          ),
+        );
+      } catch (err) {
+        log.error('mirror_sweep_failed', {
+          streamId: meta.streamId,
+          fromSeq: through + 1,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        await this.ctx.storage.setAlarm(Date.now() + MIRROR_RETRY_DELAY_MS);
+        return;
+      }
+
+      through = events[events.length - 1].seq;
+      await this.ctx.storage.put(MIRRORED_KEY, through);
+    }
+
+    // Still behind after a bounded amount of work: continue in a new run.
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   /** Delete rollup buckets for minutes before `oldestKept`. */

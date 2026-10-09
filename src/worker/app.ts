@@ -16,6 +16,7 @@ import {
   readBodyText,
 } from '../lib/validate';
 import { log } from '../lib/log';
+import { mirrorStatement } from '../lib/read-model';
 import { streamStub } from '../do/stream';
 import { LANDING_HTML } from './landing';
 import { DEMO_HTML } from './demo';
@@ -184,31 +185,15 @@ streams.post('/:id/events', async (c) => {
     );
   }
 
-  // Project to the D1 read model. INSERT OR IGNORE makes this idempotent: a
-  // replay (or a retried request after a prior mirror failure) is a no-op or a
-  // self-heal, never a duplicate.
-  //
-  // The DO write above is durable and authoritative; D1 is an eventually-
-  // consistent projection. A mirror failure therefore must not fail the
-  // request; the client would never learn its {seq, hash} for an event that
-  // exists. The gap heals on any retry of the same Idempotency-Key.
+  // Fast-path projection into the D1 read model, so a read right after this
+  // write usually sees it. The DO commit above is durable and authoritative,
+  // and its outbox alarm guarantees delivery to D1 regardless, so a failure
+  // here must not fail the request: the client would never learn the
+  // {seq, hash} of an event that exists.
   try {
-    await c.env.DB.prepare(
-      'INSERT OR IGNORE INTO events (stream_id, seq, hash, prev_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-    )
-      .bind(
-        id,
-        result.seq,
-        result.hash,
-        result.prevHash,
-        // The DO returns the authoritative canonical payload, so the stored
-        // payload always hashes to result.hash.
-        result.canonicalPayload,
-        result.createdAt,
-      )
-      .run();
+    await mirrorStatement(c.env.DB, id, result).run();
   } catch (err) {
-    log.error('mirror_failed', {
+    log.warn('mirror_deferred', {
       streamId: id,
       seq: result.seq,
       message: err instanceof Error ? err.message : String(err),
