@@ -263,6 +263,35 @@ describe('StreamDO hash-chain integrity', () => {
     expect(await stub.verify()).toEqual({ valid: false, brokenAt: 3 });
   });
 
+  // This pins the boundary of what verify can promise. It recomputes the
+  // chain from what this server stores, so a writer who rewrites every event
+  // and the head consistently leaves it nothing to catch. Only a hash held
+  // outside the server, such as the {seq, hash} an append returned, no longer
+  // matches.
+  it('passes a consistent full rewrite: only a hash held outside the server detects it', async () => {
+    const id = 'verify-rewrite-stream';
+    const stub = await streamWith(id, 2);
+    const receipt = await stub.append({ i: 3 }, 'k-3');
+    if (receipt.status !== 'created') throw new Error(`append returned ${receipt.status}`);
+    const { chainVersion } = await stub.head();
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      let prev = await genesisHash(id, chainVersion);
+      const events = await state.storage.list<StoredEvent>({ prefix: 'event:' });
+      for (const [key, event] of events) {
+        const payload = { amount: 999999 };
+        const hash = await nextHash(prev, payload, event.seq, chainVersion);
+        await state.storage.put(key, { ...event, payload, prevHash: prev, hash });
+        prev = hash;
+      }
+      const meta = (await state.storage.get<Record<string, unknown>>('meta'))!;
+      await state.storage.put('meta', { ...meta, headHash: prev });
+    });
+
+    expect(await stub.verify()).toEqual({ valid: true });
+    expect((await stub.head()).headHash).not.toBe(receipt.hash);
+  });
+
   it('throws for an uninitialized stream, consistent with head()', async () => {
     const stub = streamStub('verify-uninitialized-stream');
     // No create(): meta is absent. A false { valid: true } here would report a
