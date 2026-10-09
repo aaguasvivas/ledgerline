@@ -25,4 +25,18 @@ jobs:
         run: npm run typecheck
 
       - name: Test
-        run: npm test
+        run: npx vitest run --reporter=default --reporter=json --outputFile.json=vitest.json
+
+      # The landing page and README quote the test count; every quote must match.
+      - name: Check quoted test count
+        run: |
+          node -e '
+            const fs = require("fs");
+            const n = require("./vitest.json").numTotalTests;
+            for (const f of ["src/worker/landing.ts", "README.md"]) {
+              const quoted = [...fs.readFileSync(f, "utf8").matchAll(/\b(\d+) tests\b/g)].map((m) => Number(m[1]));
+              if (quoted.length === 0 || quoted.some((c) => c !== n)) {
+                throw new Error(`${f} quotes ${JSON.stringify(quoted)} tests; the suite has ${n}`);
+              }
+            }
+          '

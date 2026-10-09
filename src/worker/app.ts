@@ -13,11 +13,13 @@ import {
   MAX_PAYLOAD_BYTES,
   assertIdempotencyKey,
   assertPayloadShape,
+  readBodyText,
 } from '../lib/validate';
 import { log } from '../lib/log';
+import { mirrorStatement } from '../lib/read-model';
 import { streamStub } from '../do/stream';
-import { LANDING_HTML } from './landing';
-import { DEMO_HTML } from './demo';
+import { renderLanding } from './landing';
+import OG_IMAGE from './og.png';
 
 /**
  * The Ledgerline HTTP API.
@@ -29,11 +31,19 @@ import { DEMO_HTML } from './demo';
  */
 const app = new Hono<AppEnv>();
 
-/** Tiny static landing page. */
-app.get('/', (c) => c.html(LANDING_HTML));
+/** Landing page with the interactive chain demo: static, no server state. */
+app.get('/', (c) => c.html(renderLanding(new URL(c.req.url).origin)));
 
-/** Interactive walkthrough: static, unauthenticated, no server state. */
-app.get('/demo', (c) => c.html(DEMO_HTML));
+/** The walkthrough used to live here; keep existing links working. */
+app.get('/demo', (c) => c.redirect('/#tamper', 301));
+
+/** Social preview card referenced by the landing page's Open Graph tags. */
+app.get('/og.png', (c) =>
+  c.body(OG_IMAGE, 200, {
+    'Content-Type': 'image/png',
+    'Cache-Control': 'public, max-age=86400',
+  }),
+);
 
 /** Liveness probe: unauthenticated, no rate limit. */
 app.get('/health', (c) => c.json({ status: 'ok' }));
@@ -49,11 +59,22 @@ app.post('/v1/keys', async (c) => {
     throw new ApiError(403, 'forbidden', 'Invalid or missing admin secret');
   }
 
+  // An empty body means "all defaults"; anything else must be a JSON object.
+  // Silently defaulting a malformed body would mint a key the admin did not
+  // ask for (wrong rate, no name).
   let body: { name?: unknown; rate_per_min?: unknown } = {};
-  try {
-    body = await c.req.json();
-  } catch {
-    // Empty/invalid body is fine; fall back to defaults.
+  const raw = await readBodyText(c.req.raw, 4096);
+  if (raw.trim() !== '') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new ApiError(400, 'invalid_body', 'Request body must be a JSON object');
+    }
+    body = parsed as typeof body;
   }
 
   const name = typeof body.name === 'string' ? body.name : 'unnamed';
@@ -132,7 +153,13 @@ streams.post('/', async (c) => {
   return c.json({ id }, 201);
 });
 
-/** POST /v1/streams/:id/events → append (idempotent by Idempotency-Key). */
+/**
+ * POST /v1/streams/:id/events → append (idempotent by Idempotency-Key).
+ *
+ * 201 for a new event; 200 + `Idempotent-Replay: true` for a retry of the same
+ * key and payload; 422 when the key is reused with a different payload, as the
+ * IETF Idempotency-Key draft specifies.
+ */
 streams.post('/:id/events', async (c) => {
   const idempotencyKey = c.req.header('Idempotency-Key');
   if (!idempotencyKey) {
@@ -147,14 +174,7 @@ streams.post('/:id/events', async (c) => {
   const id = c.req.param('id');
   await requireOwnedStream(c, id);
 
-  const raw = await c.req.text();
-  if (new TextEncoder().encode(raw).length > MAX_PAYLOAD_BYTES) {
-    throw new ApiError(
-      413,
-      'payload_too_large',
-      `Payload exceeds ${MAX_PAYLOAD_BYTES} bytes`,
-    );
-  }
+  const raw = await readBodyText(c.req.raw, MAX_PAYLOAD_BYTES);
 
   let payload: unknown;
   try {
@@ -165,41 +185,32 @@ streams.post('/:id/events', async (c) => {
   assertPayloadShape(payload);
 
   const result = await streamStub(c.env, id).append(payload, idempotencyKey);
+  if (result.status === 'conflict') {
+    throw new ApiError(
+      422,
+      'idempotency_key_reused',
+      `Idempotency-Key was already used for seq ${result.seq} with a different payload`,
+    );
+  }
 
-  // Project to the D1 read model. INSERT OR IGNORE makes this idempotent: an
-  // idempotent replay (or a retried request after a prior mirror failure) is a
-  // no-op or a self-heal, never a duplicate.
-  //
-  // The DO write above is durable and authoritative; D1 is an eventually-
-  // consistent projection. A mirror failure therefore must not fail the
-  // request; the client would never learn its {seq, hash} for an event that
-  // exists. The gap heals on any retry of the same Idempotency-Key.
+  // Fast-path projection into the D1 read model, so a read right after this
+  // write usually sees it. The DO commit above is durable and authoritative,
+  // and its outbox alarm guarantees delivery to D1 regardless, so a failure
+  // here must not fail the request: the client would never learn the
+  // {seq, hash} of an event that exists.
   try {
-    await c.env.DB.prepare(
-      'INSERT OR IGNORE INTO events (stream_id, seq, hash, prev_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-    )
-      .bind(
-        id,
-        result.seq,
-        result.hash,
-        result.prevHash,
-        // The DO returns the authoritative canonical payload (the original
-        // event on a replay), so the stored payload always hashes to
-        // result.hash.
-        result.canonicalPayload,
-        result.createdAt,
-      )
-      .run();
+    await mirrorStatement(c.env.DB, id, result).run();
   } catch (err) {
-    log.error('mirror_failed', {
+    log.warn('mirror_deferred', {
       streamId: id,
       seq: result.seq,
       message: err instanceof Error ? err.message : String(err),
     });
   }
 
-  if (result.replay) c.header('Idempotent-Replay', 'true');
-  return c.json({ seq: result.seq, hash: result.hash }, result.replay ? 200 : 201);
+  const replayed = result.status === 'replayed';
+  if (replayed) c.header('Idempotent-Replay', 'true');
+  return c.json({ seq: result.seq, hash: result.hash }, replayed ? 200 : 201);
 });
 
 /** GET /v1/streams/:id/events → paginated events from D1. */
@@ -222,7 +233,16 @@ streams.get('/:id/events', async (c) => {
       created_at: number;
     }>();
 
-  const events = results.map((r) => ({
+  // seq is gap-free at the authority, so a hole here is an event D1 has not
+  // received yet. End the page before it: a reader whose cursor moved past the
+  // hole would never see that event, even after the outbox fills it.
+  const contiguous: typeof results = [];
+  for (const r of results) {
+    if (r.seq !== after + contiguous.length + 1) break;
+    contiguous.push(r);
+  }
+
+  const events = contiguous.map((r) => ({
     seq: r.seq,
     hash: r.hash,
     prevHash: r.prev_hash,

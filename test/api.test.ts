@@ -104,16 +104,21 @@ describe('unicode payloads end-to-end', () => {
 });
 
 describe('GET /v1/streams/:id/head', () => {
-  it('returns count and head hash', async () => {
+  it('returns count, head hash, and chain version', async () => {
     const id = await api.createStream();
     await api.append(id, { a: 1 }, 'h1');
     await api.append(id, { a: 2 }, 'h2');
 
     const res = await api.fetch(`/v1/streams/${id}/head`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { count: number; headHash: string };
+    const body = (await res.json()) as {
+      count: number;
+      headHash: string;
+      chainVersion: number;
+    };
     expect(body.count).toBe(2);
     expect(body.headHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.chainVersion).toBe(2);
   });
 });
 

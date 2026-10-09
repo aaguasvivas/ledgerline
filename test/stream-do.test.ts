@@ -1,11 +1,41 @@
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
-import type { StreamDO } from '../src/do/stream';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import type { StoredEvent, StreamDO } from '../src/do/stream';
+import { genesisHash, nextHash, sha256Hex } from '../src/lib/hash';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /** Typed handle to a StreamDO instance addressed by stream id. */
 function streamStub(streamId: string): DurableObjectStub<StreamDO> {
   const ns = env.STREAM as unknown as DurableObjectNamespace<StreamDO>;
   return ns.get(ns.idFromName(streamId));
+}
+
+/** Create a stream and append `n` events ({ i } under key `k-i`, i from 1). */
+async function streamWith(id: string, n: number) {
+  const stub = streamStub(id);
+  await stub.create(id);
+  for (let i = 1; i <= n; i++) await stub.append({ i }, `k-${i}`);
+  return stub;
+}
+
+/** Rewrite (or, with `null`, delete) the stored event at `seq`, as an attacker with storage access would. */
+async function tamper(
+  stub: DurableObjectStub<StreamDO>,
+  seq: number,
+  edit: (event: StoredEvent) => StoredEvent | null,
+): Promise<void> {
+  await runInDurableObject(stub, async (_instance, state) => {
+    const events = await state.storage.list<StoredEvent>({ prefix: 'event:' });
+    for (const [key, event] of events) {
+      if (event.seq !== seq) continue;
+      const next = edit(event);
+      if (next === null) await state.storage.delete(key);
+      else await state.storage.put(key, next);
+    }
+  });
 }
 
 describe('StreamDO ordering', () => {
@@ -35,27 +65,37 @@ describe('StreamDO exactly-once (idempotency)', () => {
     await stub.create('idem-stream');
 
     const first = await stub.append({ amount: 100 }, 'same-key');
-    expect(first.replay).toBe(false);
+    expect(first.status).toBe('created');
 
     const second = await stub.append({ amount: 100 }, 'same-key');
-    expect(second.replay).toBe(true);
-    expect(second.seq).toBe(first.seq);
-    expect(second.hash).toBe(first.hash);
+    expect(second.status).toBe('replayed');
+    expect(second).toEqual({ ...first, status: 'replayed' });
 
     // Exactly one event exists.
     expect((await stub.head()).count).toBe(1);
   });
 
-  it('treats the key as authoritative: a repeat returns the original even if the payload differs', async () => {
+  it('replays a retry whose body only differs in key order (canonical comparison)', async () => {
+    const stub = streamStub('idem-reorder-stream');
+    await stub.create('idem-reorder-stream');
+
+    const first = await stub.append({ a: 1, b: { c: 2, d: 3 } }, 'k');
+    const retry = await stub.append({ b: { d: 3, c: 2 }, a: 1 }, 'k');
+
+    expect(retry).toEqual({ ...first, status: 'replayed' });
+  });
+
+  it('refuses to reuse a key with a different payload, and writes nothing', async () => {
     const stub = streamStub('idem-conflict-stream');
     await stub.create('idem-conflict-stream');
 
     const first = await stub.append({ v: 'original' }, 'dup');
     const second = await stub.append({ v: 'changed' }, 'dup');
 
-    expect(second.replay).toBe(true);
-    expect(second.hash).toBe(first.hash);
+    expect(second).toEqual({ status: 'conflict', seq: first.seq });
     expect((await stub.head()).count).toBe(1);
+    // The key stays bound to the original: a faithful retry still replays.
+    expect((await stub.append({ v: 'original' }, 'dup')).status).toBe('replayed');
   });
 });
 
@@ -104,6 +144,43 @@ describe('StreamDO rollup buckets', () => {
   });
 });
 
+// Chain rules are versioned per stream, so a rule change never re-judges
+// existing history. v1 differs from v2 only in how it ordered integer-like
+// keys, which is exactly what these payloads exercise.
+describe('StreamDO chain versions', () => {
+  it('creates new streams under the current chain version', async () => {
+    const stub = await streamWith('version-new-stream', 0);
+    const head = await stub.head();
+    expect(head.chainVersion).toBe(2);
+    expect(head.headHash).toBe(await genesisHash('version-new-stream', 2));
+  });
+
+  it('keeps appending and verifying a v1 stream under v1 rules', async () => {
+    const id = 'version-v1-stream';
+    const stub = streamStub(id);
+    const genesis = await genesisHash(id, 1);
+    // A stream as it was stored before versioning existed: no `chain` field.
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put('meta', { streamId: id, seq: 0, count: 0, headHash: genesis });
+    });
+
+    const payload = { 9: 'a', 10: 'b' };
+    const appended = await stub.append(payload, 'k-1');
+    expect(appended.status === 'created' && appended.hash).toBe(
+      await nextHash(genesis, payload, 1, 1),
+    );
+    expect(appended.status === 'created' && appended.hash).not.toBe(
+      await nextHash(genesis, payload, 1, 2),
+    );
+    // The read model stores the v1 bytes, so its rows still hash to `hash`.
+    if (appended.status !== 'created') throw new Error('expected a new event');
+    expect(appended.canonicalPayload).toBe('{"9":"a","10":"b"}');
+    expect(await sha256Hex(`${genesis}|${appended.canonicalPayload}|1`)).toBe(appended.hash);
+    expect((await stub.head()).chainVersion).toBe(1);
+    expect(await stub.verify()).toEqual({ valid: true });
+  });
+});
+
 describe('StreamDO hash-chain integrity', () => {
   it('verifies an untampered chain', async () => {
     const stub = streamStub('verify-ok-stream');
@@ -114,23 +191,60 @@ describe('StreamDO hash-chain integrity', () => {
   });
 
   it('detects tampering and reports the first divergent seq', async () => {
-    const stub = streamStub('verify-tampered-stream');
-    await stub.create('verify-tampered-stream');
-    for (let i = 1; i <= 4; i++) await stub.append({ i }, `t-${i}`);
+    const stub = await streamWith('verify-tampered-stream', 4);
 
     // Tamper with the stored payload of event seq=2, leaving its hash intact.
-    await runInDurableObject(stub, async (_instance, state) => {
-      const events = await state.storage.list<{ seq: number; payload: unknown }>(
-        { prefix: 'event:' },
-      );
-      for (const [key, event] of events) {
-        if (event.seq === 2) {
-          await state.storage.put(key, { ...event, payload: { i: 999 } });
-        }
-      }
-    });
+    await tamper(stub, 2, (event) => ({ ...event, payload: { i: 999 } }));
 
     expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
+  });
+
+  // Regression: verify recomputed links from its own running hash and never
+  // looked at the stored prevHash, so a forged prevHash (served to clients by
+  // GET /events) passed as valid.
+  it('detects a forged prevHash even when every hash recomputes', async () => {
+    const stub = await streamWith('verify-prevhash-stream', 3);
+
+    await tamper(stub, 2, (event) => ({ ...event, prevHash: 'f'.repeat(64) }));
+
+    expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
+  });
+
+  // Regression: deleting a middle event used to be reported at the NEXT seq,
+  // pointing an investigator at an intact event instead of the missing one.
+  it('reports a deleted middle event at its own seq', async () => {
+    const stub = await streamWith('verify-gap-stream', 4);
+
+    await tamper(stub, 2, () => null);
+
+    expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
+  });
+
+  // verify reads meta, then walks the log across many awaits. If an append
+  // commits in between, its event lies past the snapshot's head; counting it
+  // made a healthy stream report { valid: false } under live traffic.
+  it('verifies the head it started from when an append commits mid-walk', async () => {
+    const stub = await streamWith('verify-snapshot-stream', 3);
+
+    const result = await runInDurableObject(stub, async (obj) => {
+      const instance = obj as StreamDO;
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      let appended = false;
+      // verify's first digest (the genesis hash) runs after it read meta:
+      // commit seq 4 right there, as a concurrently delivered append would.
+      vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, data) => {
+        if (!appended) {
+          appended = true;
+          await instance.append({ i: 4 }, 'k-4');
+        }
+        return digest(algorithm, data);
+      });
+      return instance.verify();
+    });
+
+    expect(result).toEqual({ valid: true });
+    expect((await stub.head()).count).toBe(4);
+    expect(await stub.verify()).toEqual({ valid: true });
   });
 
   // Tail truncation is the classic ledger rollback: deleting the trailing
@@ -151,6 +265,35 @@ describe('StreamDO hash-chain integrity', () => {
     });
 
     expect(await stub.verify()).toEqual({ valid: false, brokenAt: 3 });
+  });
+
+  // This pins the boundary of what verify can promise. It recomputes the
+  // chain from what this server stores, so a writer who rewrites every event
+  // and the head consistently leaves it nothing to catch. Only a hash held
+  // outside the server, such as the {seq, hash} an append returned, no longer
+  // matches.
+  it('passes a consistent full rewrite: only a hash held outside the server detects it', async () => {
+    const id = 'verify-rewrite-stream';
+    const stub = await streamWith(id, 2);
+    const receipt = await stub.append({ i: 3 }, 'k-3');
+    if (receipt.status !== 'created') throw new Error(`append returned ${receipt.status}`);
+    const { chainVersion } = await stub.head();
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      let prev = await genesisHash(id, chainVersion);
+      const events = await state.storage.list<StoredEvent>({ prefix: 'event:' });
+      for (const [key, event] of events) {
+        const payload = { amount: 999999 };
+        const hash = await nextHash(prev, payload, event.seq, chainVersion);
+        await state.storage.put(key, { ...event, payload, prevHash: prev, hash });
+        prev = hash;
+      }
+      const meta = (await state.storage.get<Record<string, unknown>>('meta'))!;
+      await state.storage.put('meta', { ...meta, headHash: prev });
+    });
+
+    expect(await stub.verify()).toEqual({ valid: true });
+    expect((await stub.head()).headHash).not.toBe(receipt.hash);
   });
 
   it('throws for an uninitialized stream, consistent with head()', async () => {

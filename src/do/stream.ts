@@ -1,6 +1,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
-import { canonicalize, genesisHash, nextHash } from '../lib/hash';
+import {
+  CHAIN_VERSION,
+  canonicalizeFor,
+  genesisHash,
+  nextHash,
+  type ChainVersion,
+} from '../lib/hash';
+import { mirrorStatement, type MirrorRow } from '../lib/read-model';
+import { log } from '../lib/log';
 
 /** Per-stream metadata; the O(1) head of the log. */
 interface Meta {
@@ -12,6 +20,15 @@ interface Meta {
   count: number;
   /** Hash of the most recent event, or the genesis hash when empty. */
   headHash: string;
+  /**
+   * Chain-rule version the stream was created under, kept for life. Absent on
+   * streams created before versioning, which are v1.
+   */
+  chain?: ChainVersion;
+}
+
+function chainVersion(meta: Meta): ChainVersion {
+  return meta.chain ?? 1;
 }
 
 /** A persisted event. */
@@ -29,23 +46,75 @@ interface IdemRecord {
   hash: string;
 }
 
-/** Result of an append (or an idempotent replay). */
-export interface AppendResult {
+/** A committed event, as returned to the Worker for the response and mirror. */
+export interface CommittedEvent {
   seq: number;
   hash: string;
   prevHash: string;
   createdAt: number;
   /**
-   * Canonical JSON of the authoritative payload. On a replay this is the
-   * ORIGINAL event's payload (not the retried body), so a mirror always matches
-   * `hash`. A string (not `unknown`) keeps the RPC return type serializable.
+   * Canonical JSON of the authoritative payload in the stream's chain version,
+   * so a mirrored row always hashes to `hash`. A string (not `unknown`) keeps
+   * the RPC return type serializable.
    */
   canonicalPayload: string;
-  /** True when this call replayed an existing event for a repeated key. */
-  replay: boolean;
+}
+
+/**
+ * Outcome of an append.
+ * - `created`: a new event was committed.
+ * - `replayed`: the key was used before with the same payload; the original
+ *   event comes back and nothing is written.
+ * - `conflict`: the key was used before with a DIFFERENT payload; nothing is
+ *   written, and the caller must not report success.
+ */
+export type AppendResult =
+  | ({ status: 'created' | 'replayed' } & CommittedEvent)
+  | { status: 'conflict'; seq: number };
+
+/** Result of a chain verification. */
+export interface VerifyResult {
+  valid: boolean;
+  /** First seq that is missing, out of order, or fails to link. */
+  brokenAt?: number;
 }
 
 const META_KEY = 'meta';
+
+/**
+ * Every seq at or below this watermark is known to be in D1 (or, if the event
+ * itself is gone from storage, can never be). Only alarm() writes it.
+ */
+const MIRRORED_KEY = 'mirror:through';
+
+/**
+ * Delay between an append and the outbox sweep that guarantees it reaches D1.
+ * The Worker's inline mirror normally lands first, so the sweep usually just
+ * confirms; it exists for the times the inline write does not.
+ */
+const MIRROR_SWEEP_DELAY_MS = 5_000;
+
+/** Back-off after a failed sweep. The alarm reschedules itself indefinitely. */
+const MIRROR_RETRY_DELAY_MS = 30_000;
+
+/** Pause between sweeps while working through a backlog. */
+const MIRROR_CONTINUE_DELAY_MS = 250;
+
+/**
+ * D1 statements one sweep may issue, counting each statement in a batch. Kept
+ * under the Workers Free per-invocation query limit (50), so a sweep can never
+ * fail on quota alone; a larger backlog continues in a fresh invocation.
+ */
+const MIRROR_QUERY_BUDGET = 40;
+
+/** Seqs checked against D1 by one SELECT. */
+const MIRROR_WINDOW = 500;
+
+/** Rows per INSERT batch; also bounded by MIRROR_BATCH_CHARS. */
+const MIRROR_BATCH_SIZE = 25;
+
+/** Approximate payload size per INSERT batch (UTF-16 code units). */
+const MIRROR_BATCH_CHARS = 1_000_000;
 
 /** Zero-padded so DO storage `list()` returns events in seq order. */
 function eventKey(seq: number): string {
@@ -59,6 +128,36 @@ function idemKey(key: string): string {
 /** Per-minute rollup bucket key (minute = floor(epochMs / 60000)). */
 function bucketKey(minute: number): string {
   return `bucket:${minute}`;
+}
+
+/**
+ * The read-model row for a stored event, or null when the event is missing or
+ * damaged (a seq that disagrees with its key, a missing field, a payload with
+ * no canonical form). The row is keyed by the seq the sweep looked up, never
+ * by a stored field, so a damaged event cannot claim another event's row.
+ */
+function mirrorRow(
+  event: StoredEvent | undefined,
+  seq: number,
+  canonical: (value: unknown) => string,
+): MirrorRow | null {
+  if (
+    !event ||
+    event.seq !== seq ||
+    typeof event.hash !== 'string' ||
+    typeof event.prevHash !== 'string' ||
+    typeof event.createdAt !== 'number'
+  ) {
+    return null;
+  }
+  let canonicalPayload: unknown;
+  try {
+    canonicalPayload = canonical(event.payload);
+  } catch {
+    return null;
+  }
+  if (typeof canonicalPayload !== 'string') return null;
+  return { seq, hash: event.hash, prevHash: event.prevHash, canonicalPayload, createdAt: event.createdAt };
 }
 
 /** Typed handle to the StreamDO for a given stream id. */
@@ -83,6 +182,11 @@ export function streamStub(
  * other events until the critical section completes. The result is strict
  * serialization (monotonic `seq` and exactly-once appends) with no locks,
  * leases, or coordination beyond the platform.
+ *
+ * The object also owns delivery to the D1 read model: every append arms an
+ * alarm, and alarm() reconciles D1 against the log until it confirms the head
+ * (a transactional outbox), so the projection converges even when the
+ * Worker's inline mirror write fails.
  */
 export class StreamDO extends DurableObject<Env> {
   /**
@@ -94,12 +198,13 @@ export class StreamDO extends DurableObject<Env> {
       const existing = await this.ctx.storage.get<Meta>(META_KEY);
       if (existing) return { created: false };
 
-      const headHash = await genesisHash(streamId);
+      const headHash = await genesisHash(streamId, CHAIN_VERSION);
       await this.ctx.storage.put<Meta>(META_KEY, {
         streamId,
         seq: 0,
         count: 0,
         headHash,
+        chain: CHAIN_VERSION,
       });
       return { created: true };
     });
@@ -108,36 +213,48 @@ export class StreamDO extends DurableObject<Env> {
   /**
    * Append a payload under an idempotency key.
    *
-   * If the key was used before, the original event is returned unchanged with
-   * `replay: true` and nothing is written: exactly-once under client retries.
-   * Otherwise a new event is linked into the hash chain and `meta`, the event,
-   * and the idempotency record are committed in a single atomic batch.
+   * A key is bound to its first payload for the life of the stream. Reusing it
+   * with the same payload replays the original event (exactly-once under
+   * client retries); reusing it with a different payload is a `conflict`, so a
+   * client bug cannot be silently absorbed as a success. Otherwise a new event
+   * is linked into the hash chain and the event, idempotency record, rollup
+   * bucket, and `meta` are committed in a single atomic batch.
    */
   async append(payload: unknown, idempotencyKey: string): Promise<AppendResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const meta = await this.ctx.storage.get<Meta>(META_KEY);
       if (!meta) throw new Error('stream not initialized');
 
+      const version = chainVersion(meta);
+      const canonical = canonicalizeFor(version);
+      const canonicalPayload = canonical(payload);
+
       const prior = await this.ctx.storage.get<IdemRecord>(
         idemKey(idempotencyKey),
       );
       if (prior) {
-        const event = await this.ctx.storage.get<StoredEvent>(
+        const event = (await this.ctx.storage.get<StoredEvent>(
           eventKey(prior.seq),
-        );
+        ))!;
+        const original = canonical(event.payload);
+        // Compare canonical forms: a retry that only re-serializes the body
+        // (different key order or whitespace) is the same request.
+        if (original !== canonicalPayload) {
+          return { status: 'conflict', seq: prior.seq };
+        }
         return {
+          status: 'replayed',
           seq: prior.seq,
           hash: prior.hash,
-          prevHash: event!.prevHash,
-          createdAt: event!.createdAt,
-          canonicalPayload: canonicalize(event!.payload),
-          replay: true,
+          prevHash: event.prevHash,
+          createdAt: event.createdAt,
+          canonicalPayload: original,
         };
       }
 
       const seq = meta.seq + 1;
       const prevHash = meta.headHash;
-      const hash = await nextHash(prevHash, payload, seq);
+      const hash = await nextHash(prevHash, payload, seq, version);
       const createdAt = Date.now();
       const event: StoredEvent = { seq, prevHash, hash, payload, createdAt };
 
@@ -145,14 +262,25 @@ export class StreamDO extends DurableObject<Env> {
       const existingBucket = await this.ctx.storage.get<number>(
         bucketKey(minute),
       );
+      const sweepPending = (await this.ctx.storage.getAlarm()) !== null;
 
-      // One batched put → atomic commit of every key this append touches.
-      await this.ctx.storage.put({
-        [eventKey(seq)]: event,
-        [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
-        [bucketKey(minute)]: (existingBucket ?? 0) + 1,
-        [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
-      });
+      // One batched put → atomic commit of every key this append touches. The
+      // outbox alarm is armed in the same breath (no await in between, so the
+      // platform coalesces both into one atomic write), but never pushed back
+      // when one is already pending: under steady traffic a timer reset on
+      // every append would never fire.
+      const writes = [
+        this.ctx.storage.put({
+          [eventKey(seq)]: event,
+          [idemKey(idempotencyKey)]: { seq, hash } satisfies IdemRecord,
+          [bucketKey(minute)]: (existingBucket ?? 0) + 1,
+          [META_KEY]: { ...meta, seq, count: meta.count + 1, headHash: hash },
+        }),
+      ];
+      if (!sweepPending) {
+        writes.push(this.ctx.storage.setAlarm(createdAt + MIRROR_SWEEP_DELAY_MS));
+      }
+      await Promise.all(writes);
 
       // First append of a new minute: drop rollup buckets that have aged out
       // of the stats window, keeping bucket storage bounded (~60 keys) instead
@@ -162,21 +290,24 @@ export class StreamDO extends DurableObject<Env> {
       }
 
       return {
+        status: 'created',
         seq,
         hash,
         prevHash,
         createdAt,
-        canonicalPayload: canonicalize(payload),
-        replay: false,
+        canonicalPayload,
       };
     });
   }
 
-  /** O(1) head of the log: total count and the current head hash. */
-  async head(): Promise<{ count: number; headHash: string }> {
+  /**
+   * O(1) head of the log: total count, the current head hash, and the chain
+   * version an external verifier needs to recompute it.
+   */
+  async head(): Promise<{ count: number; headHash: string; chainVersion: ChainVersion }> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     if (!meta) throw new Error('stream not initialized');
-    return { count: meta.count, headHash: meta.headHash };
+    return { count: meta.count, headHash: meta.headHash, chainVersion: chainVersion(meta) };
   }
 
   /**
@@ -205,35 +336,139 @@ export class StreamDO extends DurableObject<Env> {
 
   /**
    * Recompute the hash chain from genesis and report the first sequence number
-   * whose stored hash diverges from the recomputed value. An untampered stream
+   * that is missing, out of order, or fails to link. An untampered stream
    * returns `{ valid: true }`.
+   *
+   * Every stored field that the chain vouches for is checked: `seq` must be
+   * contiguous, `prevHash` must equal the recomputed previous hash, and `hash`
+   * must equal the recomputed link. The walk then compares its result with
+   * `meta`, which commits to the true head, so tail truncation is caught too.
    */
-  async verify(): Promise<{ valid: boolean; brokenAt?: number }> {
+  async verify(): Promise<VerifyResult> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     // Missing meta means the authoritative state is gone (storage loss, botched
     // migration). Fail loudly, like head(); never report a vanished log as valid.
     if (!meta) throw new Error('stream not initialized');
 
-    let prev = await genesisHash(meta.streamId);
-    let count = 0;
-    let lastSeq = 0;
-    for await (const event of this.iterateEvents()) {
-      const expected = await nextHash(prev, event.payload, event.seq);
+    // Walk exactly the history this snapshot of `meta` commits to. If the
+    // runtime ever delivered an append during one of the awaits below, its
+    // event would sit past `meta.seq` and must not read as tampering.
+    const version = chainVersion(meta);
+    let prev = await genesisHash(meta.streamId, version);
+    let seq = 0;
+    for await (const event of this.iterateEvents(meta.seq)) {
+      seq += 1;
+      if (event.seq !== seq || event.prevHash !== prev) {
+        return { valid: false, brokenAt: seq };
+      }
+      const expected = await nextHash(prev, event.payload, seq, version);
       if (expected !== event.hash) {
-        return { valid: false, brokenAt: event.seq };
+        return { valid: false, brokenAt: seq };
       }
       prev = expected;
-      count += 1;
-      lastSeq = event.seq;
     }
 
     // The links recomputed cleanly; now confirm this is the WHOLE chain.
     // Tail truncation leaves a clean prefix; meta commits to the true head, so
     // compare both the event count and the final hash against it.
-    if (count !== meta.count || prev !== meta.headHash) {
-      return { valid: false, brokenAt: lastSeq + 1 };
+    if (seq !== meta.count || prev !== meta.headHash) {
+      return { valid: false, brokenAt: seq + 1 };
     }
     return { valid: true };
+  }
+
+  /**
+   * Outbox sweep: reconcile the D1 read model with the log, from the
+   * confirmed watermark toward the head.
+   *
+   * For each window of seqs, one SELECT asks D1 which rows it already holds,
+   * and only the missing ones are inserted (INSERT OR IGNORE, so racing the
+   * Worker's inline write is harmless). Catching up after an outage therefore
+   * costs one query per 500 seqs plus one statement per event that was really
+   * lost, and progress is computed from seq arithmetic, never from stored
+   * fields: a missing or damaged event is logged and skipped (verify reports
+   * it, and pages stop before it), so it cannot stall the sweep. Each sweep stays inside a fixed
+   * query budget and continues in a fresh invocation when work remains. A
+   * failed sweep is logged and rescheduled on our own clock rather than
+   * thrown: platform alarm retries stop after a few attempts, and the read
+   * model must converge however long D1 is down.
+   */
+  override async alarm(): Promise<void> {
+    const meta = await this.ctx.storage.get<Meta>(META_KEY);
+    if (!meta) return;
+    const db = this.env.DB;
+    const canonical = canonicalizeFor(chainVersion(meta));
+    let through = (await this.ctx.storage.get<number>(MIRRORED_KEY)) ?? 0;
+    let queries = 0;
+
+    try {
+      for (;;) {
+        // Re-read the head every window: the D1 round-trips yield, so appends
+        // may have committed in the meantime.
+        const head = (await this.ctx.storage.get<Meta>(META_KEY))!.seq;
+        if (through >= head) return;
+        if (queries >= MIRROR_QUERY_BUDGET) break;
+
+        const windowEnd = Math.min(head, through + MIRROR_WINDOW);
+        const { results } = await db
+          .prepare('SELECT seq FROM events WHERE stream_id = ? AND seq > ? AND seq <= ?')
+          .bind(meta.streamId, through, windowEnd)
+          .all<{ seq: number }>();
+        queries += 1;
+        const present = new Set(results.map((row) => row.seq));
+        const missing: number[] = [];
+        for (let seq = through + 1; seq <= windowEnd; seq++) {
+          if (!present.has(seq)) missing.push(seq);
+        }
+
+        let done = 0;
+        while (done < missing.length && queries < MIRROR_QUERY_BUDGET) {
+          const wanted = missing.slice(
+            done,
+            done + Math.min(MIRROR_BATCH_SIZE, MIRROR_QUERY_BUDGET - queries),
+          );
+          const stored = await this.ctx.storage.get<StoredEvent>(wanted.map(eventKey));
+          const statements: D1PreparedStatement[] = [];
+          let chars = 0;
+          for (const seq of wanted) {
+            const row = mirrorRow(stored.get(eventKey(seq)), seq, canonical);
+            if (!row) {
+              // Missing or damaged at the authority: D1 can never hold a
+              // faithful copy. verify() reports it, pages stop before it, and
+              // the projection moves on past it.
+              log.error('mirror_event_unusable', { streamId: meta.streamId, seq });
+              done += 1;
+              continue;
+            }
+            if (statements.length > 0 && chars + row.canonicalPayload.length > MIRROR_BATCH_CHARS) {
+              break;
+            }
+            chars += row.canonicalPayload.length;
+            statements.push(mirrorStatement(db, meta.streamId, row));
+            done += 1;
+          }
+          if (statements.length > 0) {
+            await db.batch(statements);
+            queries += statements.length;
+          }
+        }
+
+        // Every seq below the first one still missing is now in D1.
+        through = done < missing.length ? missing[done] - 1 : windowEnd;
+        await this.ctx.storage.put(MIRRORED_KEY, through);
+      }
+    } catch (err) {
+      log.error('mirror_sweep_failed', {
+        streamId: meta.streamId,
+        fromSeq: through + 1,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      await this.ctx.storage.setAlarm(Date.now() + MIRROR_RETRY_DELAY_MS);
+      return;
+    }
+
+    // Query budget spent with work left: continue in a fresh invocation.
+    await this.ctx.storage.setAlarm(Date.now() + MIRROR_CONTINUE_DELAY_MS);
   }
 
   /** Delete rollup buckets for minutes before `oldestKept`. */
@@ -249,13 +484,14 @@ export class StreamDO extends DurableObject<Env> {
     }
   }
 
-  /** Yield every stored event in ascending seq order, paginating storage. */
-  private async *iterateEvents(): AsyncGenerator<StoredEvent> {
+  /** Yield stored events with seq <= `throughSeq`, ascending, paginating storage. */
+  private async *iterateEvents(throughSeq: number): AsyncGenerator<StoredEvent> {
     let cursor: string | undefined;
     for (;;) {
       const batch = await this.ctx.storage.list<StoredEvent>({
         prefix: 'event:',
         startAfter: cursor,
+        end: eventKey(throughSeq + 1),
         limit: 1000,
       });
       if (batch.size === 0) break;

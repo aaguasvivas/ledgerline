@@ -53,6 +53,63 @@ describe('payload limits', () => {
     expect(body.error.code).toBe('idempotency_key_invalid');
   });
 
+  // Regression: the body used to be buffered in full before its size was
+  // checked. A large chunked body (no Content-Length) separates the two
+  // behaviours by how much of it the server pulls: a streaming cap stops near
+  // 256 KiB, while buffer-then-check drains all 8 MiB before answering 413.
+  it('stops reading an oversized chunked body (no Content-Length) at the cap', async () => {
+    const chunk = new TextEncoder().encode('x'.repeat(65_536));
+    const total = 8 * 1024 * 1024;
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"data":"'));
+      },
+      pull(controller) {
+        if (pulled >= total) return controller.close();
+        pulled += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+    });
+
+    const res = await api.fetch(`/v1/streams/${streamId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'chunked' },
+      body,
+    });
+    expect(res.status).toBe(413);
+    const json = (await res.json()) as { error: { code: string } };
+    expect(json.error.code).toBe('payload_too_large');
+    expect(pulled).toBeLessThan(total / 2);
+  });
+
+  it('rejects a body that is not valid UTF-8 instead of silently replacing bytes', async () => {
+    const bytes = new Uint8Array([0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]); // {"a":"<0xFF>"}
+    const res = await api.fetch(`/v1/streams/${streamId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'bad-utf8' },
+      body: bytes,
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: { code: string } };
+    expect(json.error.code).toBe('invalid_payload');
+  });
+
+  // An escaped lone surrogate is legal JSON text (and valid UTF-8 on the wire)
+  // but not valid Unicode, and has no RFC 8785 canonical form, so external
+  // verifiers could disagree. The source holds a doubled backslash so the
+  // request body carries the six-character JSON escape, not a raw code unit.
+  it('rejects unpaired UTF-16 surrogates in values and keys', async () => {
+    for (const raw of ['{"a":"\\ud800"}', '{"\\udc00":1}', '["ok", "x\\ud83d"]', '"\\ude80\\ud83d"']) {
+      const res = await appendRaw(raw);
+      expect(res.status, raw).toBe(400);
+      const json = (await res.json()) as { error: { code: string } };
+      expect(json.error.code).toBe('invalid_payload');
+    }
+    // A well-formed surrogate PAIR (an astral character) is fine.
+    expect((await appendRaw('{"a":"\\ud83d\\ude80"}')).status).toBe(201);
+  });
+
   it('still accepts reasonable payloads (10-deep nesting, 100 KiB body)', async () => {
     const nested = { a: { b: { c: { d: { e: { f: { g: { h: { i: { j: 1 } } } } } } } } } };
     const ok1 = await appendRaw(JSON.stringify(nested));

@@ -1,4 +1,5 @@
 import { env, SELF } from 'cloudflare:test';
+import { vi } from 'vitest';
 import { sha256Hex } from '../src/lib/hash';
 
 const BASE = 'https://ledgerline.test';
@@ -65,4 +66,22 @@ export async function seededClient(
   opts: { ratePerMin?: number; name?: string } = {},
 ): Promise<ReturnType<typeof client>> {
   return client(await seedKey(opts));
+}
+
+/**
+ * Make crypto.subtle.digest wait on a timer before it resolves.
+ *
+ * workerd computes digests without opening a Durable Object's input gate, so
+ * concurrent requests never actually interleave at that await on their own,
+ * and a concurrency test would pass even with blockConcurrencyWhile removed.
+ * A real (1 ms) timer opens the gate long enough for queued requests to be
+ * delivered mid-append: the worst case the code defends against. Undo with
+ * vi.restoreAllMocks().
+ */
+export function forceDigestToYield(): void {
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, data) => {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    return digest(algorithm, data);
+  });
 }
