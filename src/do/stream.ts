@@ -29,21 +29,30 @@ interface IdemRecord {
   hash: string;
 }
 
-/** Result of an append (or an idempotent replay). */
-export interface AppendResult {
+/** A committed event, as returned to the Worker for the response and mirror. */
+export interface CommittedEvent {
   seq: number;
   hash: string;
   prevHash: string;
   createdAt: number;
   /**
-   * Canonical JSON of the authoritative payload. On a replay this is the
-   * ORIGINAL event's payload (not the retried body), so a mirror always matches
+   * Canonical JSON of the authoritative payload, so a mirror always matches
    * `hash`. A string (not `unknown`) keeps the RPC return type serializable.
    */
   canonicalPayload: string;
-  /** True when this call replayed an existing event for a repeated key. */
-  replay: boolean;
 }
+
+/**
+ * Outcome of an append.
+ * - `created`: a new event was committed.
+ * - `replayed`: the key was used before with the same payload; the original
+ *   event comes back and nothing is written.
+ * - `conflict`: the key was used before with a DIFFERENT payload; nothing is
+ *   written, and the caller must not report success.
+ */
+export type AppendResult =
+  | ({ status: 'created' | 'replayed' } & CommittedEvent)
+  | { status: 'conflict'; seq: number };
 
 /** Result of a chain verification. */
 export interface VerifyResult {
@@ -90,6 +99,7 @@ export function streamStub(
  * other events until the critical section completes. The result is strict
  * serialization (monotonic `seq` and exactly-once appends) with no locks,
  * leases, or coordination beyond the platform.
+
  */
 export class StreamDO extends DurableObject<Env> {
   /**
@@ -115,30 +125,40 @@ export class StreamDO extends DurableObject<Env> {
   /**
    * Append a payload under an idempotency key.
    *
-   * If the key was used before, the original event is returned unchanged with
-   * `replay: true` and nothing is written: exactly-once under client retries.
-   * Otherwise a new event is linked into the hash chain and `meta`, the event,
-   * and the idempotency record are committed in a single atomic batch.
+   * A key is bound to its first payload for the life of the stream. Reusing it
+   * with the same payload replays the original event (exactly-once under
+   * client retries); reusing it with a different payload is a `conflict`, so a
+   * client bug cannot be silently absorbed as a success. Otherwise a new event
+   * is linked into the hash chain and the event, idempotency record, rollup
+   * bucket, and `meta` are committed in a single atomic batch.
    */
   async append(payload: unknown, idempotencyKey: string): Promise<AppendResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const meta = await this.ctx.storage.get<Meta>(META_KEY);
       if (!meta) throw new Error('stream not initialized');
 
+      const canonicalPayload = canonicalize(payload);
+
       const prior = await this.ctx.storage.get<IdemRecord>(
         idemKey(idempotencyKey),
       );
       if (prior) {
-        const event = await this.ctx.storage.get<StoredEvent>(
+        const event = (await this.ctx.storage.get<StoredEvent>(
           eventKey(prior.seq),
-        );
+        ))!;
+        const original = canonicalize(event.payload);
+        // Compare canonical forms: a retry that only re-serializes the body
+        // (different key order or whitespace) is the same request.
+        if (original !== canonicalPayload) {
+          return { status: 'conflict', seq: prior.seq };
+        }
         return {
+          status: 'replayed',
           seq: prior.seq,
           hash: prior.hash,
-          prevHash: event!.prevHash,
-          createdAt: event!.createdAt,
-          canonicalPayload: canonicalize(event!.payload),
-          replay: true,
+          prevHash: event.prevHash,
+          createdAt: event.createdAt,
+          canonicalPayload: original,
         };
       }
 
@@ -169,12 +189,12 @@ export class StreamDO extends DurableObject<Env> {
       }
 
       return {
+        status: 'created',
         seq,
         hash,
         prevHash,
         createdAt,
-        canonicalPayload: canonicalize(payload),
-        replay: false,
+        canonicalPayload,
       };
     });
   }

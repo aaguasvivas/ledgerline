@@ -144,7 +144,13 @@ streams.post('/', async (c) => {
   return c.json({ id }, 201);
 });
 
-/** POST /v1/streams/:id/events → append (idempotent by Idempotency-Key). */
+/**
+ * POST /v1/streams/:id/events → append (idempotent by Idempotency-Key).
+ *
+ * 201 for a new event; 200 + `Idempotent-Replay: true` for a retry of the same
+ * key and payload; 422 when the key is reused with a different payload, as the
+ * IETF Idempotency-Key draft specifies.
+ */
 streams.post('/:id/events', async (c) => {
   const idempotencyKey = c.req.header('Idempotency-Key');
   if (!idempotencyKey) {
@@ -170,10 +176,17 @@ streams.post('/:id/events', async (c) => {
   assertPayloadShape(payload);
 
   const result = await streamStub(c.env, id).append(payload, idempotencyKey);
+  if (result.status === 'conflict') {
+    throw new ApiError(
+      422,
+      'idempotency_key_reused',
+      `Idempotency-Key was already used for seq ${result.seq} with a different payload`,
+    );
+  }
 
-  // Project to the D1 read model. INSERT OR IGNORE makes this idempotent: an
-  // idempotent replay (or a retried request after a prior mirror failure) is a
-  // no-op or a self-heal, never a duplicate.
+  // Project to the D1 read model. INSERT OR IGNORE makes this idempotent: a
+  // replay (or a retried request after a prior mirror failure) is a no-op or a
+  // self-heal, never a duplicate.
   //
   // The DO write above is durable and authoritative; D1 is an eventually-
   // consistent projection. A mirror failure therefore must not fail the
@@ -188,9 +201,8 @@ streams.post('/:id/events', async (c) => {
         result.seq,
         result.hash,
         result.prevHash,
-        // The DO returns the authoritative canonical payload (the original
-        // event on a replay), so the stored payload always hashes to
-        // result.hash.
+        // The DO returns the authoritative canonical payload, so the stored
+        // payload always hashes to result.hash.
         result.canonicalPayload,
         result.createdAt,
       )
@@ -203,8 +215,9 @@ streams.post('/:id/events', async (c) => {
     });
   }
 
-  if (result.replay) c.header('Idempotent-Replay', 'true');
-  return c.json({ seq: result.seq, hash: result.hash }, result.replay ? 200 : 201);
+  const replayed = result.status === 'replayed';
+  if (replayed) c.header('Idempotent-Replay', 'true');
+  return c.json({ seq: result.seq, hash: result.hash }, replayed ? 200 : 201);
 });
 
 /** GET /v1/streams/:id/events → paginated events from D1. */

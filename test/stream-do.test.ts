@@ -64,27 +64,37 @@ describe('StreamDO exactly-once (idempotency)', () => {
     await stub.create('idem-stream');
 
     const first = await stub.append({ amount: 100 }, 'same-key');
-    expect(first.replay).toBe(false);
+    expect(first.status).toBe('created');
 
     const second = await stub.append({ amount: 100 }, 'same-key');
-    expect(second.replay).toBe(true);
-    expect(second.seq).toBe(first.seq);
-    expect(second.hash).toBe(first.hash);
+    expect(second.status).toBe('replayed');
+    expect(second).toEqual({ ...first, status: 'replayed' });
 
     // Exactly one event exists.
     expect((await stub.head()).count).toBe(1);
   });
 
-  it('treats the key as authoritative: a repeat returns the original even if the payload differs', async () => {
+  it('replays a retry whose body only differs in key order (canonical comparison)', async () => {
+    const stub = streamStub('idem-reorder-stream');
+    await stub.create('idem-reorder-stream');
+
+    const first = await stub.append({ a: 1, b: { c: 2, d: 3 } }, 'k');
+    const retry = await stub.append({ b: { d: 3, c: 2 }, a: 1 }, 'k');
+
+    expect(retry).toEqual({ ...first, status: 'replayed' });
+  });
+
+  it('refuses to reuse a key with a different payload, and writes nothing', async () => {
     const stub = streamStub('idem-conflict-stream');
     await stub.create('idem-conflict-stream');
 
     const first = await stub.append({ v: 'original' }, 'dup');
     const second = await stub.append({ v: 'changed' }, 'dup');
 
-    expect(second.replay).toBe(true);
-    expect(second.hash).toBe(first.hash);
+    expect(second).toEqual({ status: 'conflict', seq: first.seq });
     expect((await stub.head()).count).toBe(1);
+    // The key stays bound to the original: a faithful retry still replays.
+    expect((await stub.append({ v: 'original' }, 'dup')).status).toBe('replayed');
   });
 });
 
