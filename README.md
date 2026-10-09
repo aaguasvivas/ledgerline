@@ -298,7 +298,7 @@ What's covered:
 5. **Rate limiting**: exhausting a key's bucket returns `429`; tokens refill over time (token-bucket math unit-tested with injected time).
 6. **Auth**: missing/invalid bearer → `401`; another key's stream → `404`; the admin guard fails closed when its secret is unset.
 7. **Durability**: state survives Durable Object eviction: seq continues, idempotency records replay, drained rate buckets stay drained.
-8. **Input limits**: oversized (including chunked), too-deep, non-UTF-8, non-finite, and unpaired-surrogate payloads fail as typed 4xx errors, never 500s.
+8. **Input limits**: oversized, too-deep, non-UTF-8, non-finite, and unpaired-surrogate payloads fail as typed 4xx errors, never 500s; an oversized chunked upload is abandoned near the cap instead of being read to the end.
 9. **Canonical-form contract**: RFC 8785's worked examples, known-answer SHA-256 vectors, `__proto__` round-trip fidelity, and unescaped-unicode bytes.
 10. **The demo page**: the chain embedded in `/` is replayed through a real `StreamDO`, so the page can never drift from the server's hash rule.
 
