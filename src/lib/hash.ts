@@ -78,6 +78,11 @@ function sortDeepV1(value: unknown): unknown {
   return value;
 }
 
+/** The canonical form a chain version hashes (and stores in the read model). */
+export function canonicalizeFor(version: ChainVersion): (value: unknown) => string {
+  return version === 1 ? canonicalizeV1 : canonicalize;
+}
+
 /** SHA-256 of a UTF-8 string, returned as lowercase hex. */
 export async function sha256Hex(input: string): Promise<string> {
   const bytes = new TextEncoder().encode(input);
@@ -104,8 +109,7 @@ export function nextHash(
   seq: number,
   version: ChainVersion = CHAIN_VERSION,
 ): Promise<string> {
-  const canonical = version === 1 ? canonicalizeV1(payload) : canonicalize(payload);
-  return sha256Hex(`${prevHash}|${canonical}|${seq}`);
+  return sha256Hex(`${prevHash}|${canonicalizeFor(version)(payload)}|${seq}`);
 }
 
 /** Encode bytes as lowercase hex. */

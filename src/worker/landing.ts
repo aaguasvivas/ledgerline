@@ -470,7 +470,7 @@ const PAGE = `<!doctype html>
 
 <div class="stats">
   <div class="wrap"><ul>
-    <li><a class="statlink" href="${REPO_URL}/tree/main/test"><b>98 tests</b><span>in workerd, against real Durable Objects and D1, with faults injected on purpose.</span></a></li>
+    <li><a class="statlink" href="${REPO_URL}/tree/main/test"><b>99 tests</b><span>in workerd, against real Durable Objects and D1, with faults injected on purpose.</span></a></li>
     <li><b>20 racing writes</b><span>get seq 1 to 20 with no gaps. Delete the concurrency guard and the test fails.</span></li>
     <li><b>4 tamper cases</b><span>edited payload, forged prevHash, deleted event, cut tail: verify names the first broken seq.</span></li>
     <li><a class="statlink" href="#testing"><b>${BUGS.length} bugs</b><span>found in review, fixed, and each pinned by a regression test.</span></a></li>
@@ -611,7 +611,7 @@ const PAGE = `<!doctype html>
   </div>
   <div class="testing">
     <div class="facts">
-      <div class="fact"><b>98 tests</b><span>Run inside workerd, the real Workers runtime, against real Durable Objects and a local D1. The only test doubles are deliberate fault injections: SQL triggers and a dropped table that make D1 fail, and a spy on <code>crypto.subtle.digest</code> that forces requests to interleave.</span></div>
+      <div class="fact"><b>99 tests</b><span>Run inside workerd, the real Workers runtime, against real Durable Objects and a local D1. The only test doubles are deliberate fault injections: SQL triggers and a dropped table that make D1 fail, and a spy on <code>crypto.subtle.digest</code> that forces requests to interleave.</span></div>
       <div class="fact"><b>Tests that fail when the mechanism is removed</b><span>Delete <code>blockConcurrencyWhile</code> and the concurrency tests fail. Fault tests make D1 reject event inserts and require the read model to converge anyway, without re-sending what it already has.</span></div>
       <div class="fact"><b>Conformance vectors</b><span>The canonical form is pinned to RFC 8785's own worked examples, plus known-answer SHA-256 vectors for both chain versions, cross-checked against an independent implementation.</span></div>
     </div>

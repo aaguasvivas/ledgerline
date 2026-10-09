@@ -31,7 +31,7 @@ Around that core: a D1 read model fed by a transactional outbox (it can lag, but
 
 - **Tests that fail when the mechanism is removed.** The concurrency suite forces the race that `blockConcurrencyWhile` defends against, so deleting the guard makes it fail.
 - **Conformance-tested, and versioned.** The canonical form is pinned to RFC 8785's own worked examples, which is how a key-ordering bug in the original canonicalizer surfaced. The fix shipped as a new per-stream chain version, so streams written under the old rule keep verifying.
-- **98 tests in the real Workers runtime** (workerd), against real Durable Objects and a local D1. Faults are injected on purpose: a SQL trigger makes D1 reject event inserts, and a 1 ms delay wrapped around the real `crypto.subtle.digest` forces requests to interleave.
+- **99 tests in the real Workers runtime** (workerd), against real Durable Objects and a local D1. Faults are injected on purpose: a SQL trigger makes D1 reject event inserts, and a 1 ms delay wrapped around the real `crypto.subtle.digest` forces requests to interleave.
 - **Failure modes, each pinned by a test.** [One table](#failure-modes) covers lost responses, D1 outages, evictions, appends that land mid-verify, and the consistent rewrite that `verify` cannot catch.
 
 ---
@@ -320,7 +320,7 @@ What happens when part of the system breaks, and which test pins it.
 Tests run inside the **real Workers runtime** (`workerd` via Miniflare and `@cloudflare/vitest-pool-workers`) against actual Durable Objects and a local D1. Faults are injected on purpose: SQL triggers make D1 reject event inserts, a dropped `api_keys` table stands in for D1 being unreachable, and tamper tests edit Durable Object storage directly. The only test doubles are two spies on `crypto.subtle.digest`: one adds a 1 ms delay so requests interleave, the other lands an append mid-verify.
 
 ```bash
-npm test            # 98 tests
+npm test            # 99 tests
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit (strict)
 ```
@@ -397,7 +397,7 @@ src/
 migrations/0001_init.sql  D1 read-model schema
 scripts/seed.mjs          mint a key into local/remote D1
 scripts/og-card.html      source for the social preview card
-test/                     98 tests
+test/                     99 tests
 ```
 
 ---

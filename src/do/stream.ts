@@ -2,12 +2,12 @@ import { DurableObject } from 'cloudflare:workers';
 import type { Env } from '../types';
 import {
   CHAIN_VERSION,
-  canonicalize,
+  canonicalizeFor,
   genesisHash,
   nextHash,
   type ChainVersion,
 } from '../lib/hash';
-import { mirrorStatement } from '../lib/read-model';
+import { mirrorStatement, type MirrorRow } from '../lib/read-model';
 import { log } from '../lib/log';
 
 /** Per-stream metadata; the O(1) head of the log. */
@@ -53,8 +53,9 @@ export interface CommittedEvent {
   prevHash: string;
   createdAt: number;
   /**
-   * Canonical JSON of the authoritative payload, so a mirror always matches
-   * `hash`. A string (not `unknown`) keeps the RPC return type serializable.
+   * Canonical JSON of the authoritative payload in the stream's chain version,
+   * so a mirrored row always hashes to `hash`. A string (not `unknown`) keeps
+   * the RPC return type serializable.
    */
   canonicalPayload: string;
 }
@@ -129,6 +130,36 @@ function bucketKey(minute: number): string {
   return `bucket:${minute}`;
 }
 
+/**
+ * The read-model row for a stored event, or null when the event is missing or
+ * damaged (a seq that disagrees with its key, a missing field, a payload with
+ * no canonical form). The row is keyed by the seq the sweep looked up, never
+ * by a stored field, so a damaged event cannot claim another event's row.
+ */
+function mirrorRow(
+  event: StoredEvent | undefined,
+  seq: number,
+  canonical: (value: unknown) => string,
+): MirrorRow | null {
+  if (
+    !event ||
+    event.seq !== seq ||
+    typeof event.hash !== 'string' ||
+    typeof event.prevHash !== 'string' ||
+    typeof event.createdAt !== 'number'
+  ) {
+    return null;
+  }
+  let canonicalPayload: unknown;
+  try {
+    canonicalPayload = canonical(event.payload);
+  } catch {
+    return null;
+  }
+  if (typeof canonicalPayload !== 'string') return null;
+  return { seq, hash: event.hash, prevHash: event.prevHash, canonicalPayload, createdAt: event.createdAt };
+}
+
 /** Typed handle to the StreamDO for a given stream id. */
 export function streamStub(
   env: Env,
@@ -194,7 +225,9 @@ export class StreamDO extends DurableObject<Env> {
       const meta = await this.ctx.storage.get<Meta>(META_KEY);
       if (!meta) throw new Error('stream not initialized');
 
-      const canonicalPayload = canonicalize(payload);
+      const version = chainVersion(meta);
+      const canonical = canonicalizeFor(version);
+      const canonicalPayload = canonical(payload);
 
       const prior = await this.ctx.storage.get<IdemRecord>(
         idemKey(idempotencyKey),
@@ -203,7 +236,7 @@ export class StreamDO extends DurableObject<Env> {
         const event = (await this.ctx.storage.get<StoredEvent>(
           eventKey(prior.seq),
         ))!;
-        const original = canonicalize(event.payload);
+        const original = canonical(event.payload);
         // Compare canonical forms: a retry that only re-serializes the body
         // (different key order or whitespace) is the same request.
         if (original !== canonicalPayload) {
@@ -221,7 +254,7 @@ export class StreamDO extends DurableObject<Env> {
 
       const seq = meta.seq + 1;
       const prevHash = meta.headHash;
-      const hash = await nextHash(prevHash, payload, seq, chainVersion(meta));
+      const hash = await nextHash(prevHash, payload, seq, version);
       const createdAt = Date.now();
       const event: StoredEvent = { seq, prevHash, hash, payload, createdAt };
 
@@ -353,7 +386,8 @@ export class StreamDO extends DurableObject<Env> {
    * Worker's inline write is harmless). Catching up after an outage therefore
    * costs one query per 500 seqs plus one statement per event that was really
    * lost, and progress is computed from seq arithmetic, never from stored
-   * fields, so a damaged event cannot stall it. Each sweep stays inside a fixed
+   * fields: a missing or damaged event is logged and skipped (verify reports
+   * it, and pages stop before it), so it cannot stall the sweep. Each sweep stays inside a fixed
    * query budget and continues in a fresh invocation when work remains. A
    * failed sweep is logged and rescheduled on our own clock rather than
    * thrown: platform alarm retries stop after a few attempts, and the read
@@ -363,6 +397,7 @@ export class StreamDO extends DurableObject<Env> {
     const meta = await this.ctx.storage.get<Meta>(META_KEY);
     if (!meta) return;
     const db = this.env.DB;
+    const canonical = canonicalizeFor(chainVersion(meta));
     let through = (await this.ctx.storage.get<number>(MIRRORED_KEY)) ?? 0;
     let queries = 0;
 
@@ -396,28 +431,20 @@ export class StreamDO extends DurableObject<Env> {
           const statements: D1PreparedStatement[] = [];
           let chars = 0;
           for (const seq of wanted) {
-            const event = stored.get(eventKey(seq));
-            if (!event) {
-              // The authority lost this event; D1 can never have it. verify()
-              // reports the gap, and the projection moves on past it.
-              log.error('mirror_event_missing', { streamId: meta.streamId, seq });
+            const row = mirrorRow(stored.get(eventKey(seq)), seq, canonical);
+            if (!row) {
+              // Missing or damaged at the authority: D1 can never hold a
+              // faithful copy. verify() reports it, pages stop before it, and
+              // the projection moves on past it.
+              log.error('mirror_event_unusable', { streamId: meta.streamId, seq });
               done += 1;
               continue;
             }
-            const canonicalPayload = canonicalize(event.payload);
-            if (statements.length > 0 && chars + canonicalPayload.length > MIRROR_BATCH_CHARS) {
+            if (statements.length > 0 && chars + row.canonicalPayload.length > MIRROR_BATCH_CHARS) {
               break;
             }
-            chars += canonicalPayload.length;
-            statements.push(
-              mirrorStatement(db, meta.streamId, {
-                seq: event.seq,
-                hash: event.hash,
-                prevHash: event.prevHash,
-                canonicalPayload,
-                createdAt: event.createdAt,
-              }),
-            );
+            chars += row.canonicalPayload.length;
+            statements.push(mirrorStatement(db, meta.streamId, row));
             done += 1;
           }
           if (statements.length > 0) {

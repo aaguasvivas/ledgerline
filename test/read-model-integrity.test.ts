@@ -207,6 +207,49 @@ describe('read model delivery', () => {
     expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
   });
 
+  // Regression: a stored event missing its payload or hash made every sweep's
+  // batch throw, so the sweep retried the same batch forever and its intact
+  // neighbours never reached D1; and a damaged seq field let an event claim
+  // another seq's row, permanently shadowing the real event there.
+  it('skips damaged events without stalling, and never lets one take another row', async () => {
+    const api = await seededClient();
+    const id = await api.createStream();
+    const stub = streamStub(id);
+    for (let i = 1; i <= 5; i++) await stub.append({ i }, `k-${i}`);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const events = await state.storage.list<StoredEvent>({ prefix: 'event:' });
+      for (const [key, event] of events) {
+        if (event.seq === 2) {
+          const { payload: _payload, ...rest } = event;
+          await state.storage.put(key, rest);
+        }
+        if (event.seq === 3) await state.storage.put(key, { ...event, seq: 7 });
+        if (event.seq === 4) {
+          const { hash: _hash, ...rest } = event;
+          await state.storage.put(key, rest);
+        }
+      }
+    });
+    const rows = async () =>
+      (await env.DB.prepare('SELECT seq, payload FROM events WHERE stream_id = ? ORDER BY seq')
+        .bind(id)
+        .all<{ seq: number; payload: string }>()).results;
+
+    await drainOutbox(stub); // throws if it does not converge
+    expect((await rows()).map((r) => r.seq)).toEqual([1, 5]);
+
+    // Seq 7 belongs to the real seventh event, not to damaged event 3.
+    for (const i of [6, 7]) expect((await api.append(id, { i }, `k-${i}`)).status).toBe(201);
+    await drainOutbox(stub);
+    expect(await rows()).toEqual([
+      { seq: 1, payload: '{"i":1}' },
+      { seq: 5, payload: '{"i":5}' },
+      { seq: 6, payload: '{"i":6}' },
+      { seq: 7, payload: '{"i":7}' },
+    ]);
+    expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
+  });
+
   it('a faithful retry re-mirrors the ORIGINAL event, matching the stored hash', async () => {
     const api = await seededClient();
     const id = await api.createStream();

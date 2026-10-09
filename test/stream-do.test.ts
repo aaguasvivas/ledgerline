@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { StoredEvent, StreamDO } from '../src/do/stream';
-import { genesisHash, nextHash } from '../src/lib/hash';
+import { genesisHash, nextHash, sha256Hex } from '../src/lib/hash';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -172,6 +172,10 @@ describe('StreamDO chain versions', () => {
     expect(appended.status === 'created' && appended.hash).not.toBe(
       await nextHash(genesis, payload, 1, 2),
     );
+    // The read model stores the v1 bytes, so its rows still hash to `hash`.
+    if (appended.status !== 'created') throw new Error('expected a new event');
+    expect(appended.canonicalPayload).toBe('{"9":"a","10":"b"}');
+    expect(await sha256Hex(`${genesis}|${appended.canonicalPayload}|1`)).toBe(appended.hash);
     expect((await stub.head()).chainVersion).toBe(1);
     expect(await stub.verify()).toEqual({ valid: true });
   });
