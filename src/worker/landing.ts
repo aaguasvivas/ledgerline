@@ -113,7 +113,7 @@ const BLOCKS = DEMO_EVENTS.map((ev, i) => {
           </label>
           <dl class="hashes">
             <div><dt>stored</dt><dd>${short(ev.hash)}</dd></div>
-            <div><dt>recomputed</dt><dd id="re-${ev.seq}">computing…</dd></div>
+            <div><dt>recomputed</dt><dd id="re-${ev.seq}">…</dd></div>
           </dl>
           <p class="verdict" id="verdict-${ev.seq}">&nbsp;</p>
         </li>`;
@@ -156,6 +156,7 @@ const PAGE = `<!doctype html>
 <meta property="og:image:alt" content="Ledgerline: three hash-linked events and a passing verify">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="${FAVICON}">
+<noscript><style>.js-only { display: none !important; }</style></noscript>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,600;1,8..60,600&display=swap">
@@ -225,6 +226,9 @@ const PAGE = `<!doctype html>
   .proof-top { display: flex; align-items: center; gap: 0.55rem; color: var(--muted); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-dim); transition: background 0.3s, box-shadow 0.3s; }
   .proof.broken .dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-dim); }
+  .proof.pending .dot { background: var(--faint); box-shadow: 0 0 0 3px rgba(122, 133, 148, 0.15); }
+  .proof.pending .proof-res { background: var(--panel-2); color: var(--muted); border-color: var(--line); }
+  .proof-note { margin: 0 0 1rem; color: var(--muted); font: 0.78rem/1.5 var(--sans); }
   .proof-req { margin-top: 1.1rem; color: var(--muted); overflow-wrap: anywhere; font-size: 0.8rem; }
   .proof-req .lbl { display: block; font-size: 0.7rem; letter-spacing: 0.04em; color: var(--faint); margin-bottom: 0.15rem; }
   .proof-req .verb { color: var(--gold); font-weight: 600; margin-right: 0.45rem; }
@@ -238,11 +242,11 @@ const PAGE = `<!doctype html>
   .mb.bad { border-color: rgba(242, 89, 79, 0.6); border-top-color: var(--bad); }
   .mb.bad span { color: var(--bad); }
   .ma { color: var(--gold); font-size: 0.9rem; }
-  .proof-foot { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding-top: 0.9rem; border-top: 1px dashed var(--line); }
-  .proof-foot small { color: var(--muted); font-size: 0.78rem; }
+  .proof-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.6rem 1rem; padding-top: 0.9rem; border-top: 1px dashed var(--line); }
+  .proof-foot small { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
   .proof-foot small b { color: var(--ink); font-weight: 600; }
   .proof-foot small b.bad { color: var(--bad); }
-  .tamper-btn { font: 600 0.84rem/1 var(--sans); color: var(--gold); background: var(--gold-dim); border: 1px solid rgba(227, 179, 65, 0.45); border-radius: 8px; padding: 0.65rem 0.9rem; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+  .tamper-btn { white-space: nowrap; font: 600 0.84rem/1 var(--sans); color: var(--gold); background: var(--gold-dim); border: 1px solid rgba(227, 179, 65, 0.45); border-radius: 8px; padding: 0.65rem 0.9rem; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
   .tamper-btn:hover { background: rgba(227, 179, 65, 0.2); border-color: var(--gold); }
 
   /* stats */
@@ -271,6 +275,7 @@ const PAGE = `<!doctype html>
   .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem; margin-bottom: 1.25rem; }
   .banner { display: inline-flex; align-items: center; gap: 0.6rem; padding: 0.7rem 1rem; border-radius: 10px; font: 600 0.9rem/1.3 var(--mono); border: 1px solid rgba(63, 191, 115, 0.45); background: var(--ok-dim); color: var(--ok); transition: background 0.25s, border-color 0.25s, color 0.25s; }
   .banner.broken { border-color: rgba(242, 89, 79, 0.5); background: var(--bad-dim); color: var(--bad); }
+  .banner.pending { border-color: var(--line); background: var(--panel-2); color: var(--muted); }
   button.reset { font: 600 0.88rem/1 var(--sans); color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 0.7rem 1rem; cursor: pointer; }
   button.reset:hover { border-color: var(--gold); color: var(--gold); }
   .status { font: 0.8rem/1.5 var(--mono); color: var(--muted); }
@@ -334,7 +339,7 @@ const PAGE = `<!doctype html>
   .steps strong { color: var(--ink); font-weight: 600; }
 
   /* recorded runs */
-  .term { font: 0.82rem/1.75 var(--mono); background: #090C10; border: 1px solid var(--line); border-radius: 12px; padding: 1.1rem 1.3rem; overflow-x: auto; white-space: pre; margin: 0; }
+  .term { font: 0.82rem/1.75 var(--mono); background: #090C10; border: 1px solid var(--line); border-radius: 12px; padding: 1.1rem 1.3rem; white-space: pre-wrap; overflow-wrap: break-word; margin: 0; }
   .term .c { color: var(--faint); }
   .term .q { color: var(--muted); }
   .term .s2 { color: var(--ok); font-weight: 600; }
@@ -458,12 +463,13 @@ const PAGE = `<!doctype html>
       <p class="stack">TypeScript (strict) · Hono · Durable Objects · D1 · Vitest in workerd</p>
     </div>
 
-    <aside class="proof" id="proof" aria-label="Verification of the demo chain">
-      <div class="proof-top"><span class="dot"></span>Real hashes · verified in browser</div>
+    <aside class="proof pending" id="proof" aria-label="Verification of the demo chain">
+      <div class="proof-top"><span class="dot"></span><span id="proofLabel">Real hashes · in-browser check</span></div>
       <div class="proof-req"><span class="lbl">same check as</span><span class="verb">GET</span><span class="path">/v1/streams/7221f193…/verify</span></div>
-      <div class="proof-res" id="proofRes">{ "valid": true }</div>
+      <div class="proof-res" id="proofRes">{ … }</div>
+      <noscript><p class="proof-note">Turn on JavaScript to recompute these hashes in your browser and tamper with them.</p></noscript>
       <ol class="mini" aria-hidden="true">${MINI}</ol>
-      <div class="proof-foot"><button class="tamper-btn" id="heroTamper" type="button">Tamper with #2</button><small>links that hold <b id="proofLinks">${DEMO_EVENTS.length} / ${DEMO_EVENTS.length}</b></small></div>
+      <div class="proof-foot"><button class="tamper-btn" id="heroTamper" type="button" hidden>Tamper with #2</button><small>links that hold <b id="proofLinks">? / ${DEMO_EVENTS.length}</b></small></div>
     </aside>
   </div>
 </header>
@@ -488,9 +494,10 @@ const PAGE = `<!doctype html>
   <div class="rule"><span class="f"><span class="g">hash_0</span> = SHA-256("ledgerline:v2:" + streamId)</span><span class="c">genesis</span><span class="f"><span class="g">hash_n</span> = SHA-256(hash_n-1 + "|" + JCS(payload_n) + "|" + n)</span><span class="c">JCS = RFC 8785 canonical JSON</span></div>
 
   <div class="controls">
-    <div class="banner" id="banner" role="status" aria-live="polite">verify → { "valid": true }</div>
-    <button class="reset" id="reset" type="button">Reset payloads</button>
-    <span class="status" id="status">recomputing chain in your browser…</span>
+    <div class="banner pending" id="banner" role="status" aria-live="polite">verify → …</div>
+    <button class="reset js-only" id="reset" type="button">Reset payloads</button>
+    <span class="status js-only" id="status">recomputing chain in your browser…</span>
+    <noscript><span class="status">Turn on JavaScript to recompute this chain and tamper with it.</span></noscript>
   </div>
 
   <div class="genesis"><span><span class="seq0">#0</span>genesis = SHA-256("ledgerline:v2:${DEMO_STREAM_ID}")</span><span>= <span class="h" id="genesis">…</span></span></div>
@@ -667,6 +674,7 @@ const PAGE = `<!doctype html>
 
   if (!window.crypto || !crypto.subtle) {
     $('status').textContent = 'your browser cannot compute SHA-256 here (it needs a secure context)';
+    $('proofLabel').textContent = 'Real hashes · this browser cannot check them here';
     return;
   }
 
@@ -729,6 +737,8 @@ const PAGE = `<!doctype html>
     $('banner').className = 'banner' + (brokenAt === null ? '' : ' broken');
     $('banner').textContent = 'verify → ' + result;
     $('proof').className = 'proof' + (brokenAt === null ? '' : ' broken');
+    $('proofLabel').textContent = 'Real hashes · checked in browser';
+    $('heroTamper').hidden = false;
     $('proofRes').textContent = result;
     $('proofLinks').textContent = holding + ' / ' + EVENTS.length;
     $('proofLinks').className = brokenAt === null ? '' : 'bad';
