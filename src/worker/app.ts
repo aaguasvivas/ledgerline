@@ -233,7 +233,16 @@ streams.get('/:id/events', async (c) => {
       created_at: number;
     }>();
 
-  const events = results.map((r) => ({
+  // seq is gap-free at the authority, so a hole here is an event D1 has not
+  // received yet. End the page before it: a reader whose cursor moved past the
+  // hole would never see that event, even after the outbox fills it.
+  const contiguous: typeof results = [];
+  for (const r of results) {
+    if (r.seq !== after + contiguous.length + 1) break;
+    contiguous.push(r);
+  }
+
+  const events = contiguous.map((r) => ({
     seq: r.seq,
     hash: r.hash,
     prevHash: r.prev_hash,

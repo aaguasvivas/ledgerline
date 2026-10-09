@@ -157,6 +157,30 @@ describe('read model delivery', () => {
     );
   });
 
+  // Regression: a page used to return every row D1 held, so with seq 2 still
+  // in the outbox a tailing reader got [1, 3], moved its cursor to 3, and never
+  // saw seq 2 even after the outbox delivered it.
+  it('ends a page before a seq the read model has not received yet', async () => {
+    const api = await seededClient();
+    const id = await api.createStream();
+    // Only seq 2's inline mirror fails; seq 1 and seq 3 land in D1.
+    await env.DB.exec(
+      "CREATE TRIGGER outage BEFORE INSERT ON events WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'simulated'); END;",
+    );
+    for (let i = 1; i <= 3; i++) {
+      expect((await api.append(id, { i }, `k-${i}`)).status).toBe(201);
+    }
+
+    expect((await readEvents(api, id)).map((e) => e.seq)).toEqual([1]);
+
+    await restoreReadModel();
+    await drainOutbox(streamStub(id));
+    const next = (await (await api.fetch(`/v1/streams/${id}/events?after=1`)).json()) as {
+      events: ReadEvent[];
+    };
+    expect(next.events.map((e) => e.seq)).toEqual([2, 3]);
+  });
+
   // Regression: the watermark used to advance by each stored event's own seq
   // field, so one damaged event made every sweep redo the same work forever.
   it('cannot be stalled by a damaged or missing event', async () => {
@@ -173,7 +197,13 @@ describe('read model delivery', () => {
     });
 
     await drainOutbox(stub); // throws if it does not converge
-    expect((await readEvents(api, id)).map((e) => e.seq)).toEqual([1, 4]);
+    // Pages stop at the hole the authority itself lost (verify names it); a
+    // reader moves past it only by asking for after=3 explicitly.
+    expect((await readEvents(api, id)).map((e) => e.seq)).toEqual([1]);
+    const past = (await (await api.fetch(`/v1/streams/${id}/events?after=3`)).json()) as {
+      events: ReadEvent[];
+    };
+    expect(past.events.map((e) => e.seq)).toEqual([4]);
     expect(await stub.verify()).toEqual({ valid: false, brokenAt: 2 });
   });
 
